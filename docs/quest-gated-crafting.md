@@ -31,6 +31,8 @@ For a complete folder layout, pack metadata and an in-game check, follow the [tw
 
 ## Optional authoring tools
 
+The [Rust CLI](../tools/quest-journal-rs/README.md) also accepts the check command below. Replace `python tools/quest-journal/journal.py` with `quest-journal` to use it.
+
 In a development checkout, the SDK checks rule structure and cross-pack quest references. Supply the target game's resource folder to check registered item IDs and built-in quests. From the workspace root:
 
 ~~~powershell

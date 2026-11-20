@@ -10,7 +10,7 @@ For your own mod, use your own namespace for the folder, root, parents, and func
 
 ## Optional CLI for scaffolding, validation and packaging
 
-Use Python 3.10 or later. From the SDK directory run the following. The CLI works offline and uses the Python standard library.
+Choose the [standalone Rust CLI](../quest-journal-rs/README.md) or Python 3.10+. With Rust installed, replace `python journal.py` in the examples with `quest-journal` and keep the same arguments. For Python, use the following commands. From the SDK directory run the following. The CLI works offline and uses the Python standard library.
 
 ~~~powershell
 python journal.py init workshop --namespace workshop --title "Workshop Journal"

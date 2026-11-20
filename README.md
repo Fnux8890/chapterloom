@@ -52,7 +52,7 @@ Ship a companion data pack with your mod. Put the chapter definition under `data
 
 See the [mod author guide](tools/quest-journal/README.md) for chapter files, callbacks and claimable rewards. The [modpack guide](docs/quest-gated-crafting.md) covers pack priority and overrides.
 
-The optional Python CLI can scaffold a chapter, check references across packs, and build a ZIP for distribution. The game reads the same JSON files from a folder or a ZIP.
+Choose the [Rust CLI](tools/quest-journal-rs/README.md) or the [Python CLI](tools/quest-journal/README.md#optional-cli-for-scaffolding-validation-and-packaging) to scaffold a chapter, check references across packs, create claimable rewards, or build a ZIP. The game reads the same JSON files from a folder or a ZIP.
 
 ![Locked blast furnace in the Expert profile](docs/media/quest-journal/stock-blast-furnace-locked.png)
 
