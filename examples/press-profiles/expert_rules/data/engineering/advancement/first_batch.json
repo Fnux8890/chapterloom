@@ -1,0 +1,24 @@
+{
+  "display": {
+    "icon": {
+      "id": "minecraft:rail"
+    },
+    "title": {
+      "text": "Commission the Railworks"
+    },
+    "description": {
+      "text": "Produce the first batch for your colony. Reward: 3 XP."
+    },
+    "announce_to_chat": false,
+    "show_toast": true
+  },
+  "criteria": {
+    "achieved": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "parent": "engineering:press",
+  "rewards": {
+    "experience": 3
+  }
+}

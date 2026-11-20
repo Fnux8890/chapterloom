@@ -1,0 +1,49 @@
+{
+  "parent": "horizon:journal",
+  "display": {
+    "icon": {
+      "id": "minecraft:chest"
+    },
+    "title": {
+      "text": "Stock the Camp"
+    },
+    "description": {
+      "text": "Obtain a chest and a furnace. Reward: 25 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "chest": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:chest"
+          }
+        ]
+      }
+    },
+    "furnace": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:furnace"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "chest"
+    ],
+    [
+      "furnace"
+    ]
+  ],
+  "rewards": {
+    "experience": 25
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "action": "craft",
+  "scope": "player",
+  "output": "minecraft:blast_furnace",
+  "requires": {
+    "quest_completed": "horizon:workbench"
+  }
+}

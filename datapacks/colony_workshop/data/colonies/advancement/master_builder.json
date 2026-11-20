@@ -1,0 +1,24 @@
+{
+  "display": {
+    "icon": {
+      "id": "minecraft:lectern"
+    },
+    "title": {
+      "text": "Master Builder"
+    },
+    "description": {
+      "text": "Build a bookshelf east of the charter lodestone and place a lectern on it. Visit as a member. Reward: 15 XP."
+    },
+    "announce_to_chat": false,
+    "show_toast": true
+  },
+  "criteria": {
+    "achieved": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "parent": "colonies:charter",
+  "rewards": {
+    "experience": 15
+  }
+}

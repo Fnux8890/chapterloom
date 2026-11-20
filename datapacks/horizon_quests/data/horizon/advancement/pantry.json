@@ -1,0 +1,36 @@
+{
+  "parent": "horizon:supplies",
+  "display": {
+    "icon": {
+      "id": "minecraft:barrel"
+    },
+    "title": {
+      "text": "Fill the Pantry"
+    },
+    "description": {
+      "text": "Obtain a barrel. Reward: 20 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "barrel": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:barrel"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "barrel"
+    ]
+  ],
+  "rewards": {
+    "experience": 20
+  }
+}

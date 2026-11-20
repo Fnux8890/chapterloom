@@ -1,0 +1,36 @@
+{
+  "parent": "horizon:tools",
+  "display": {
+    "icon": {
+      "id": "minecraft:stone_hoe"
+    },
+    "title": {
+      "text": "Tend the Fields"
+    },
+    "description": {
+      "text": "Obtain a stone hoe. Reward: 15 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "stone_hoe": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:stone_hoe"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "stone_hoe"
+    ]
+  ],
+  "rewards": {
+    "experience": 15
+  }
+}

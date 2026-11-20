@@ -1,0 +1,37 @@
+{
+  "parent": "horizon:workbench",
+  "display": {
+    "icon": {
+      "id": "minecraft:campfire"
+    },
+    "title": {
+      "text": "Light the Hearth"
+    },
+    "description": {
+      "text": "Obtain a campfire. Reward: 15 XP."
+    },
+    "hidden": true,
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "campfire": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:campfire"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "campfire"
+    ]
+  ],
+  "rewards": {
+    "experience": 15
+  }
+}

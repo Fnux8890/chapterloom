@@ -1,0 +1,49 @@
+{
+  "parent": "horizon:journal",
+  "display": {
+    "icon": {
+      "id": "minecraft:wooden_pickaxe"
+    },
+    "title": {
+      "text": "Tools of the Trade"
+    },
+    "description": {
+      "text": "Obtain a wooden pickaxe and a wooden axe. Reward: 20 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "wooden_pickaxe": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:wooden_pickaxe"
+          }
+        ]
+      }
+    },
+    "wooden_axe": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:wooden_axe"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "wooden_pickaxe"
+    ],
+    [
+      "wooden_axe"
+    ]
+  ],
+  "rewards": {
+    "experience": 20
+  }
+}

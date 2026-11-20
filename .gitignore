@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+/dist/
+/engine/
+/tools/quest-journal-rs/target/
