@@ -2,7 +2,13 @@
 
 A chapter is a data pack. A new mod can contribute quests, attach children to another mod's chapter, or award a quest after a server action succeeds. Players press **L**, use the arrows around the chapter counter, drag the map, and select an item to read its objective and reward. The Advancements button opens the standard advancement view.
 
-## Make a playable chapter
+## Start with a companion data pack
+
+For a working example, copy the [Field Engineering pack](../../datapacks/engineering_press) into a fresh world's `datapacks/` folder. Enable it and open **L** on the beta runtime. Its `data/engineering/quest_chapter/field.json` file points to the chapter's root advancement, `engineering:press`. Edit the display description in `data/engineering/advancement/press.json`, run `/reload`, and reopen the chapter to see your change.
+
+For your own mod, use your own namespace for the folder, root, parents, and function references. For a modpack override, keep the original namespace and file path and load the override pack last. The [two-file crafting example](../../README.md#gate-a-recipe-with-a-data-pack) walks through a rule you can test in-game.
+
+## Optional CLI for scaffolding, validation and packaging
 
 Use Python 3.10 or later. From the SDK directory run the following. The CLI works offline and uses the Python standard library.
 

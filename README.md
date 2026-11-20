@@ -22,28 +22,37 @@ cargo build --manifest-path engine/Cargo.toml --locked --profile fast -p horizon
 
 Start the built executable under `engine/target/fast/` with your normal Horizon game directory and extracted resources. Use a fresh beta world. Place the Founders ZIP in that world's `datapacks/` directory and reopen the world. An operator can run `/reload`, inspect `/datapack list`, and use `/datapack enable "file/<filename>.zip"` if the pack is available but disabled. In single-player you can also select the pack at world creation. The registry entry installs this chapter. On the ordinary engine, the advancement data can load, but the book and its claim interface require the patched runtime.
 
+## Gate a recipe with a data pack
+
+In a fresh world with the beta runtime and Founders chapter enabled, create a folder named `camp_rules` inside the world's `datapacks/` folder. Add these two files with a text editor.
+
+**`camp_rules/pack.mcmeta`**
+
+```json
+{"pack":{"description":"Camp crafting rules","min_format":121,"max_format":121}}
+```
+
+**`camp_rules/data/camp/progression_rule/blast_furnace.json`**
+
+```json
+{
+  "version": 1,
+  "action": "craft",
+  "scope": "player",
+  "output": "minecraft:blast_furnace",
+  "requires": {"quest_completed": "horizon:workbench"}
+}
+```
+
+Run `/reload` and check `/datapack list enabled`. If needed, run `/datapack enable "file/camp_rules" last`. To test, use a player who has never obtained a crafting table and open one already placed in the world. Assemble a blast furnace: the result shows a red barrier. Pick up a crafting table to complete **Set Up Camp**, then try the recipe again. You can craft the furnace before claiming the XP.
+
 ## Add quests to a mod
 
-Use Python 3.10+ from the repository root:
+Ship a companion data pack with your mod. Put the chapter definition under `data/<namespace>/quest_chapter/` and its quests under `data/<namespace>/advancement/`. Use a built-in advancement trigger for actions such as obtaining an item. For a custom action, have the mod call a namespaced function tag as the credited player after the action succeeds.
 
-```sh
-python tools/quest-journal/journal.py init workshop --namespace workshop --title "Workshop Journal"
-python tools/quest-journal/journal.py check workshop
-python tools/quest-journal/journal.py build workshop workshop.zip
-```
+See the [mod author guide](tools/quest-journal/README.md) for chapter files, callbacks and claimable rewards. The [modpack guide](docs/quest-gated-crafting.md) covers pack priority and overrides.
 
-Install the ZIP in a test world. Obtain iron for the first quest. For the custom job, have your mod invoke `function #workshop:api/v1/job_completed` as the credited player after its action succeeds. The generated companion grants progress. Give each mod its own namespace and keep released advancement IDs stable across upgrades. The [SDK guide](tools/quest-journal/README.md) covers native callbacks, optional listeners, adding children to another mod's chapter, block-item loot and manual claims.
-
-## Shape a modpack
-
-Load dependencies first and your pack's overrides last. To change an existing quest, chapter or rule, put its same namespace and path in your override pack. To add an independent prerequisite, give the crafting rule a new ID. Quest completion unlocks crafting even if the player waits to collect the reward.
-
-```sh
-python examples/press-profiles/export.py beginner beginner-world.zip
-python examples/press-profiles/export.py expert expert-world.zip
-```
-
-Extract one profile into a fresh world directory. In Expert, assemble a blast furnace before obtaining a crafting table. The result shows a red barrier. Complete **Set Up Camp** and the result becomes craftable. Beginner permits ordinary blast-furnace crafting. The [profile walkthrough](examples/press-profiles/README.md) describes the rail press, colony connector and override order. The [crafting guide](docs/quest-gated-crafting.md) gives the rule JSON and validation command.
+The optional Python CLI can scaffold a chapter, check references across packs, and build a ZIP for distribution. The game reads the same JSON files from a folder or a ZIP.
 
 ![Locked blast furnace in the Expert profile](docs/media/quest-journal/stock-blast-furnace-locked.png)
 

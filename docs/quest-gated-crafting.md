@@ -27,6 +27,10 @@ The runtime matches the final primary output item. Alternate player crafting rec
 
 Load the quest dependency before the modpack rule pack. Supply the same namespace and path in a higher-priority pack to replace all fields. Removing an override reveals a lower-priority definition of the same ID. To restore ordinary crafting, remove the rule and reload or disable its pack.
 
+For a complete folder layout, pack metadata and an in-game check, follow the [two-file example](../README.md#gate-a-recipe-with-a-data-pack).
+
+## Optional authoring tools
+
 In a development checkout, the SDK checks rule structure and cross-pack quest references. Supply the target game's resource folder to check registered item IDs and built-in quests. From the workspace root:
 
 ~~~powershell
