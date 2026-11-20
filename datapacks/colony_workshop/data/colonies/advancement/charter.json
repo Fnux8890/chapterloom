@@ -1,0 +1,21 @@
+{
+  "display": {
+    "icon": {
+      "id": "minecraft:lodestone"
+    },
+    "title": {
+      "text": "Colony Workshop"
+    },
+    "description": {
+      "text": "Stand on a lodestone and use /trigger col_found. Nearby players can use /trigger col_join."
+    },
+    "announce_to_chat": false,
+    "show_toast": false,
+    "background": "minecraft:gui/advancements/backgrounds/stone"
+  },
+  "criteria": {
+    "achieved": {
+      "trigger": "minecraft:tick"
+    }
+  }
+}

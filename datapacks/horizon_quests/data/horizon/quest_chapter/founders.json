@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "root": "horizon:journal",
+  "order": -10,
+  "positions": {
+    "horizon:journal": [
+      0,
+      0
+    ],
+    "horizon:workbench": [
+      -48,
+      -22
+    ],
+    "horizon:tools": [
+      44,
+      -32
+    ],
+    "horizon:supplies": [
+      24,
+      40
+    ],
+    "horizon:bedroll": [
+      -104,
+      -50
+    ],
+    "horizon:hearth": [
+      -106,
+      8
+    ],
+    "horizon:quarry": [
+      96,
+      -52
+    ],
+    "horizon:fields": [
+      106,
+      -7
+    ],
+    "horizon:pantry": [
+      85,
+      60
+    ],
+    "horizon:wayfinder": [
+      -27,
+      66
+    ]
+  }
+}

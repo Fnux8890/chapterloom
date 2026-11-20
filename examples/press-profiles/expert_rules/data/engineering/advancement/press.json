@@ -1,0 +1,21 @@
+{
+  "display": {
+    "icon": {
+      "id": "minecraft:smithing_table"
+    },
+    "title": {
+      "text": "Colony Railworks"
+    },
+    "description": {
+      "text": "Found a colony and earn Master Builder. Operate the field press near its charter."
+    },
+    "announce_to_chat": false,
+    "show_toast": false,
+    "background": "minecraft:gui/advancements/backgrounds/stone"
+  },
+  "criteria": {
+    "achieved": {
+      "trigger": "minecraft:tick"
+    }
+  }
+}

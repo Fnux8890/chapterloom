@@ -1,0 +1,2149 @@
+--- a/crates/horizon-client-render/src/datapack.rs
++++ b/crates/horizon-client-render/src/datapack.rs
+@@ -714,7 +714,7 @@
+     let (kind, rest) = rest.split_once('/')?;
+     let kind = match kind {
+         "recipe" | "recipe_filter" | "loot_table" | "advancement" | "trade_set"
+-        | "villager_trade" | "dialog" | "damage_type" | "data_maps" | "enchantment" => kind,
++        | "villager_trade" | "dialog" | "damage_type" | "data_maps" | "enchantment" | "quest_chapter" | "progression_rule" => kind,
+         // A tag id is `{ns}:{path-under-tags}` (`tags/worldgen/biome/
+         // test:sub/mytag`), the whole path after the namespace, so nested
+         // registries keep their directory (`TagLoader`'s id shape).
+@@ -753,6 +753,8 @@
+                 "item_modifier",
+                 "loot_table",
+                 "predicate",
++                "progression_rule",
++                "quest_chapter",
+                 "recipe",
+                 "recipe_filter",
+                 "slot_source",
+--- a/crates/horizon-client/src/advancements.rs
++++ b/crates/horizon-client/src/advancements.rs
+@@ -3,6 +3,7 @@
+ //! (`EntityPredicate`, `ItemPredicate`, `LocationPredicate`, the loot
+ //! conditions advancements use).
+ mod state_ranges;
++pub mod crafting_rules;
+ 
+ use horizon_world::lazy_json::LazyJson;
+ use serde_json::Value;
+@@ -163,7 +164,7 @@
+     /// files, and each kept its own copy (7 MB). A world whose data packs bring
+     /// advancements gets its own tree ([`Tree::load_with`]).
+     pub fn shared(data: &Path, overlay: &horizon_world::loot::PackOverlay) -> Arc<Tree> {
+-        if overlay.kind("advancement").next().is_some() {
++        if overlay.kind("advancement").next().is_some() || overlay.kind("quest_chapter").next().is_some() {
+             return Arc::new(Tree::load_with(data, overlay));
+         }
+         static TREES: Mutex<Vec<(PathBuf, Weak<Tree>)>> = Mutex::new(Vec::new());
+@@ -214,6 +215,38 @@
+                 }
+                 Err(e) => log::warn!("Horizon: pack advancement {id} not loaded: {e}"),
+             }
++        }
++        // The root display travels in the existing advancement packet, including on reload.
++        // Non-journal clients simply render the original text and ignore the extra key.
++        let mut registered = BTreeSet::new();
++        for (id, files) in overlay.kind("quest_chapter") {
++            let bytes = horizon_world::loot::PackOverlay::top(files);
++            let result = (|| -> Result<(), String> {
++                #[derive(serde::Deserialize)]
++                #[serde(deny_unknown_fields)]
++                struct Chapter {
++                    version: u32,
++                    root: String,
++                    #[serde(default)]
++                    positions: BTreeMap<String, [i16; 2]>,
++                    #[serde(default)]
++                    order: i16,
++                }
++                let config: Chapter = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
++                if config.version != 1 { return Err(format!("unsupported version {}", config.version)); }
++                let Some(entry) = json.get_mut(&config.root) else { return Err(format!("unknown root {}", config.root)); };
++                if entry.get("parent").is_some() || entry.pointer("/display/title").is_none() {
++                    return Err(format!("{} must be a displayed root", config.root));
++                }
++                if !registered.insert(config.root.clone()) { return Err(format!("duplicate chapter root {}", config.root)); }
++                let title = entry["display"]["title"].take();
++                entry["display"]["title"] = serde_json::json!({
++                    "text": "", "extra": [title],
++                    "horizon:chapter_v1": {"id":id, "order":config.order, "positions":config.positions}
++                });
++                Ok(())
++            })();
++            if let Err(err) = result { log::warn!("quest_chapter/{id}: {err}"); }
+         }
+         for (id, v) in json {
+             if let Some(a) = parse(&id, &v) {
+--- /dev/null
++++ b/crates/horizon-client/src/advancements/crafting_rules.rs
+@@ -0,0 +1,211 @@
++//! Quest prerequisites on the primary output of player-operated crafting grids.
++use super::{Advancement, Progress, Tree};
++use horizon_world::loot::PackOverlay;
++use serde::Deserialize;
++use std::collections::HashMap;
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Rule {
++    version: u32,
++    action: String,
++    scope: String,
++    output: String,
++    requires: Requires,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Requires {
++    quest_completed: String,
++}
++
++#[derive(Default)]
++pub struct CraftingRules(HashMap<String, Vec<Advancement>>);
++
++fn resource_id(id: &str) -> bool {
++    let Some((ns, path)) = id.split_once(':') else {
++        return false;
++    };
++    let valid =
++        |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-');
++    !ns.is_empty()
++        && !ns.starts_with('.')
++        && ns.bytes().all(valid)
++        && path
++            .split('/')
++            .all(|part| !matches!(part, "" | "." | "..") && part.bytes().all(valid))
++}
++
++impl CraftingRules {
++    pub fn load(
++        overlay: &PackOverlay,
++        tree: &Tree,
++        item_exists: impl Fn(&str) -> bool,
++    ) -> Result<Self, (String, String)> {
++        let mut rules = Self::default();
++        let mut files: Vec<_> = overlay.kind("progression_rule").collect();
++        files.sort_by_key(|(id, _)| *id);
++        for (id, versions) in files {
++            let error = |why: &str| (id.to_owned(), why.to_owned());
++            if !resource_id(id) {
++                return Err(error("invalid resource ID"));
++            }
++            let rule: Rule = serde_json::from_slice(PackOverlay::top(versions))
++                .map_err(|e| error(&e.to_string()))?;
++            if (rule.version, rule.action.as_str(), rule.scope.as_str()) != (1, "craft", "player") {
++                return Err(error("expected version 1, action craft and scope player"));
++            }
++            if !resource_id(&rule.output) || !item_exists(&rule.output) {
++                return Err(error(&format!("unknown output {}", rule.output)));
++            }
++            let quest = &rule.requires.quest_completed;
++            if !resource_id(quest) {
++                return Err(error(&format!("invalid quest {quest}")));
++            }
++            let index = tree
++                .by_id
++                .get(quest)
++                .ok_or_else(|| error(&format!("unknown quest {quest}")))?;
++            rules
++                .0
++                .entry(rule.output)
++                .or_default()
++                .push(tree.list[*index].clone());
++        }
++        Ok(rules)
++    }
++
++    pub fn is_empty(&self) -> bool {
++        self.0.is_empty()
++    }
++
++    pub fn missing(&self, output: &str, player: &Progress) -> Option<&Advancement> {
++        self.0.get(output)?.iter().find(|quest| !player.done(quest))
++    }
++}
++
++pub type ActorRules<'a> = Option<(&'a CraftingRules, &'a Progress)>;
++pub fn missing<'a>(actor: ActorRules<'a>, output: &str) -> Option<&'a Advancement> {
++    let (rules, player) = actor?;
++    rules.missing(output, player)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn tree() -> Tree {
++        let mut tree = Tree::default();
++        for id in ["pack:a", "pack:b"] {
++            let quest = super::super::parse(
++                id,
++                &json!({"criteria":{"done":{"trigger":"minecraft:impossible"}}}),
++            )
++            .unwrap();
++            tree.by_id.insert(id.into(), tree.list.len());
++            tree.list.push(quest);
++        }
++        tree
++    }
++
++    fn rule(quest: &str) -> Vec<u8> {
++        json!({"version":1,"scope":"player","action":"craft","output":"minecraft:oak_planks",
++               "requires":{"quest_completed":quest}})
++        .to_string()
++        .into_bytes()
++    }
++
++    #[test]
++    fn quest_crafting_override_and_independent_players() {
++        let files = vec![
++            ("progression_rule/test:z".into(), vec![rule("pack:b")]),
++            (
++                "progression_rule/test:a".into(),
++                vec![rule("pack:removed"), rule("pack:a")],
++            ),
++        ];
++        let overlay = PackOverlay { files: &files };
++        let rules = CraftingRules::load(&overlay, &tree(), |_| true).unwrap();
++        let mut alice = Progress::default();
++        let bob = Progress::default();
++        let item = "minecraft:oak_planks";
++        assert_eq!(rules.missing(item, &alice).unwrap().id, "pack:a");
++        alice.grant("pack:a", "done", "");
++        assert_eq!(rules.missing(item, &alice).unwrap().id, "pack:b");
++        alice.grant("pack:b", "done", "");
++        assert!(rules.missing(item, &alice).is_none());
++        assert_eq!(rules.missing(item, &bob).unwrap().id, "pack:a");
++        assert!(rules.missing("minecraft:stone", &bob).is_none());
++        assert!(CraftingRules::load(&overlay, &tree(), |_| false).is_err());
++        assert!(CraftingRules::load(&overlay, &Tree::default(), |_| true).is_err());
++    }
++    // Menu-engine timings. Preparation and verification of each 64-craft fixture are outside the clock.
++    #[test]
++    fn quest_crafting_preview_and_bulk_timings() {
++        use crate::items::ItemStack;
++        use crate::menu::{Env, Input, Kind, Menu, tests::with_menu};
++        use std::{hint::black_box, time::Instant};
++
++        fn sample<T>(iterations: usize, mut op: impl FnMut() -> T) -> f64 {
++            for _ in 0..4 {
++                black_box(op());
++            }
++            let started = Instant::now();
++            for _ in 0..iterations {
++                black_box(black_box(&mut op)());
++            }
++            started.elapsed().as_secs_f64() * 1e9 / iterations as f64
++        }
++
++        let tree = tree();
++        let mut large = CraftingRules::default();
++        for i in 0..999 {
++            large
++                .0
++                .insert(format!("test:item_{i}"), vec![tree.list[0].clone()]);
++        }
++        large
++            .0
++            .insert("minecraft:oak_planks".into(), vec![tree.list[0].clone()]);
++        let mut progress = Progress::default();
++        progress.grant("pack:a", "done", "");
++        with_menu(Kind::Crafting, |base, preview| {
++            for (count, actor_rules) in [(0, None), (1000, Some((&large, &progress)))] {
++                let env = Env {
++                    actor_rules,
++                    ..*base
++                };
++                let log = || Some(ItemStack::new("minecraft:oak_log", 64));
++                preview.set_slot(&env, 1, log());
++                let preview_ns = sample(1000, || {
++                    preview.recompute(&env);
++                    let item = &preview.slot(0).unwrap().item;
++                    missing(env.actor_rules, black_box(item)).is_none()
++                });
++                let mut menus: Vec<_> = (0..36)
++                    .map(|_| {
++                        let mut m = Menu::new(Kind::Crafting);
++                        m.set_slot(&env, 1, log());
++                        m
++                    })
++                    .collect();
++                let mut next = menus.iter_mut();
++                let bulk_ns = sample(32, || {
++                    next.next()
++                        .unwrap()
++                        .click(&env, 0, 0, Input::QuickMove)
++                        .unwrap()
++                });
++                for m in &menus {
++                    assert!(m.slot(1).is_none());
++                    assert_eq!(m.item_crafted.len(), 64);
++                }
++                println!(
++                    "rules={count}, fresh preview {preview_ns:.0} ns, 64-craft menu transaction {bulk_ns:.0} ns"
++                );
++            }
++        });
++    }
++}
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -1942,6 +1942,7 @@
+ /// recipes, loot tables and tags from the world's pack stack, over the
+ /// resource root's own. Worlds without packs use `Resources.rest` directly.
+ struct WorldTables {
++    crafting_rules: horizon_client::advancements::crafting_rules::CraftingRules,
+     suffocation: horizon_world::suffocation::SuffocationRegistry<'static>,
+     /// The pack files the tables were built from (a native mod's among
+     /// them), for the advancement tree reload and the loot data.
+--- a/crates/horizon-client/src/game/advancements.rs
++++ b/crates/horizon-client/src/game/advancements.rs
+@@ -128,6 +128,9 @@
+ }
+ #[derive(Default)]
+ pub(super) struct AdvState {
++    // A new award waits for its first journal frame. Reopening never restarts an active burst.
++    pub(super) journal_arrivals: BTreeMap<String, Option<Instant>>,
++    pub(super) journal_bursts: BTreeMap<String, Option<Instant>>,
+     pub(super) tree: Arc<Tree>,
+     /// `ClientAdvancements`: a server's tree carries each advancement's
+     /// place on its tab (`DisplayInfo` x, y), in tree order.
+@@ -1038,6 +1041,12 @@
+         if let (Some(player), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone()) {
+             self.native_player_advancement_done(player, &name, &a.id);
+         }
++        if self.lan_acting.is_none() && !self.adv.quiet && self.journal_member(index) {
++            if a.display.as_ref().is_some_and(|d| d.hidden) {
++                self.adv.journal_arrivals.insert(a.id.clone(), None);
++            }
++            self.adv.journal_bursts.insert(a.id.clone(), None);
++        }
+         let unlocked = self.grant_rewards(index);
+         if let Some(d) = &a.display {
+             // A network player's client shows its own toast.
+@@ -2467,11 +2476,18 @@
+             }
+         } else {
+             self.adv.progress = Progress::default();
++            self.adv.journal_arrivals.clear();
++            self.adv.journal_bursts.clear();
+         }
+         for id in &p.removed {
++            self.adv.journal_arrivals.remove(id);
++            self.adv.journal_bursts.remove(id);
+             self.adv.progress.criteria.remove(id);
+         }
+         for (a, icon) in p.added.into_iter().zip(icons) {
++            if !p.reset && !self.adv.tree.by_id.contains_key(&a.id) && a.display.is_some() {
++                self.adv.journal_arrivals.insert(a.id.clone(), None);
++            }
+             list.retain(|o| o.id != a.id);
+             let display = a.display.map(|d| adv::Display {
+                 icon,
+@@ -2526,8 +2542,19 @@
+                 .filter(|(_, at)| at.is_some())
+                 .map(|(name, _)| (name, String::new()))
+                 .collect();
++            let a = &tree.list[i];
++            let was_done = self.adv.progress.done(a);
+             self.adv.progress.criteria.insert(id, obtained);
+-            let a = &tree.list[i];
++            if !p.reset && self.journal_member(i) {
++                if !self.adv.progress.done(a) {
++                    self.adv.journal_bursts.remove(&a.id);
++                } else if p.show && !was_done {
++                    if a.display.as_ref().is_some_and(|d| d.hidden) {
++                self.adv.journal_arrivals.insert(a.id.clone(), None);
++            }
++            self.adv.journal_bursts.insert(a.id.clone(), None);
++                }
++            }
+             if !p.reset
+                 && p.show
+                 && self.adv.progress.done(a)
+--- a/crates/horizon-client/src/game/advancements_screen.rs
++++ b/crates/horizon-client/src/game/advancements_screen.rs
+@@ -117,6 +117,12 @@
+     /// The cursor at the last drag step while the left button is down.
+     drag: Option<(f32, f32)>,
+     scrolling: bool,
++    journal: Option<JournalCatalog>,
++    map_chapter: Option<String>,
++    map_open: bool,
++    map_opened_at: Option<Instant>,
++    map_selected: Option<String>,
++    map_pan: (f32,f32),
+     from_pause: bool,
+     last_frame: Option<Instant>,
+ }
+@@ -154,10 +160,15 @@
+ impl Game<'_> {
+     pub(super) fn open_advancements(&mut self, from_pause: bool) {
+         self.load_advancements();
++        self.refresh_journal();
+         let tab = self.adv_ui.tab;
+         self.adv_ui = AdvUi {
+             cache: self.adv_ui.cache.take(),
+             tab,
++            map_opened_at: Some(Instant::now()),
++            map_open: !from_pause && self.adv_ui.map_chapter.is_some(),
++            journal: self.adv_ui.journal.take(),
++            map_chapter: self.adv_ui.map_chapter.take(),
+             from_pause,
+             ..Default::default()
+         };
+@@ -345,6 +356,7 @@
+                 super::screen_info::tr("gui.advancements", &[]),
+             )
+         });
++        if self.adv_ui.map_open { self.draw_journal(batch); return; }
+         let (w, h) = (batch.width, batch.height);
+         let view = self.adv_view();
+         let (left, top) = window(w, h);
+@@ -781,6 +793,40 @@
+         }
+         let b = HudBatch::new(size);
+         let (w, h) = (b.width, b.height);
++        if self.adv_ui.map_open {
++            self.refresh_journal();
++            let fold = (w * 0.5).floor();
++            if self.cursor.0 >= fold + 10.0 && self.cursor.0 < w - 20.0
++                && self.cursor.1 >= h - 43.0 && self.cursor.1 < h - 26.0 {
++                let selected = self.adv_ui.map_selected.as_ref().and_then(|id| self.adv.tree.by_id.get(id).copied())
++                    .or_else(|| self.current_chapter().map(|(_,ch)| ch.root));
++                if let Some((ClaimState::Ready, objective)) = selected.and_then(|i| self.journal_claim(i)) {
++                    let cmd = format!("trigger {objective} set 1");
++                    if self.remote.is_some() { self.send_chat(&format!("/{cmd}")); }
++                    else { self.run_command(&cmd); }
++                }
++                return;
++            }
++            if self.cursor.1 < 20.0 && (self.cursor.0-(fold-31.0)).abs() <= 34.0 {
++                if let Some((number, _)) = self.current_chapter() {
++                    let chapters = &self.adv_ui.journal.as_ref().unwrap().chapters;
++                    let next = if self.cursor.0 < fold-31.0 { number + chapters.len()-1 } else { number+1 };
++                    self.adv_ui.map_chapter = Some(self.adv.tree.list[chapters[next % chapters.len()].root].id.clone());
++                    self.adv_ui.map_selected = None;
++                    self.adv_ui.map_pan = (0.0,0.0);
++                }
++                return;
++            }
++            if self.cursor.1 < 20.0 && self.cursor.0 >= w - 90.0 {
++                self.adv_ui.map_open = false;
++                return;
++            }
++            if self.cursor.0 >= 15.0 && self.cursor.0 < (w*0.5).floor()-4.0 && self.cursor.1 >= 30.0 && self.cursor.1 < h-24.0 {
++                self.adv_ui.map_selected = self.journal_hit(w,h).map(|i| self.adv.tree.list[i].id.clone());
++                self.adv_ui.drag = Some(self.cursor);
++            }
++            return;
++        }
+         if ui::hovered(
+             self.cursor,
+             (w / 2.0 - 100.0).floor(),
+@@ -825,6 +871,11 @@
+         };
+         let (dx, dy) = (self.cursor.0 - last.0, self.cursor.1 - last.1);
+         self.adv_ui.drag = Some(self.cursor);
++        if self.adv_ui.map_open {
++            self.adv_ui.map_pan.0 = self.adv_ui.map_pan.0 + dx;
++            self.adv_ui.map_pan.1 = self.adv_ui.map_pan.1 + dy;
++            return;
++        }
+         if !self.adv_ui.scrolling {
+             self.adv_ui.scrolling = true;
+             return;
+@@ -833,8 +884,460 @@
+         self.adv_scroll_by(&view, f64::from(dx), f64::from(dy));
+     }
+     pub(super) fn advancements_scroll(&mut self, x: f32, y: f32) {
++        if self.adv_ui.map_open { return; }
+         let view = self.adv_view();
+         self.adv_scroll_by(&view, f64::from(x) * 16.0, f64::from(y) * 16.0);
++    }
++}
++
++fn journal_effects(
++    mut fill: impl FnMut(f32, f32, f32, f32, u32),
++    center: (f32, f32),
++    radius: f32,
++    focused: bool,
++    seconds: f32,
++    completion_age: Option<f32>,
++) {
++    use std::f32::consts::{PI, TAU};
++
++    let burst = completion_age.filter(|t| (0.0..1.1).contains(t));
++    if !focused && burst.is_none() {
++        return;
++    }
++
++    let abgr = |r: u8, g: u8, b: u8, a: f32| -> u32 {
++        let a = (a.clamp(0.0, 1.0) * 255.0).round() as u32;
++        (a << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32)
++    };
++
++    fn star(
++        fill: &mut impl FnMut(f32, f32, f32, f32, u32),
++        x: f32,
++        y: f32,
++        arm: f32,
++        stroke: u32,
++        core: u32,
++    ) {
++        fill(x - arm, y - 0.5, arm * 2.0, 1.0, stroke);
++        fill(x - 0.5, y - arm, 1.0, arm * 2.0, stroke);
++        fill(x - 0.5, y - 0.5, 1.0, 1.0, core);
++    }
++
++    let (cx, cy) = center;
++    if focused {
++        let pulse = 0.5 + 0.5 * (seconds * (TAU / 3.0)).sin();
++        let drift = seconds * 0.35;
++        let arc_r = radius + 2.0 + 0.5 * pulse;
++        for seg in 0..4 {
++            let base = drift + seg as f32 * (TAU * 0.25);
++            for i in 0..8 {
++                let u = (i as f32 + 0.5) / 8.0;
++                let taper = (u * PI).sin();
++                let (s, c) = (base + (u - 0.5) * 0.55).sin_cos();
++                let sz = if taper > 0.7 { 2.0 } else { 1.0 };
++                let col = abgr(255, 214, 106, (0.25 + 0.45 * pulse) * taper);
++                fill(
++                    cx + c * arc_r - sz * 0.5,
++                    cy + s * arc_r - sz * 0.5,
++                    sz,
++                    sz,
++                    col,
++                );
++            }
++        }
++        for g in 0..2 {
++            let tw = 0.5 + 0.5 * (seconds * (TAU / 3.0) + g as f32 * PI).sin();
++            let (s, c) = (drift * 1.4 + 0.7 + g as f32 * PI).sin_cos();
++            let r = radius + 2.5;
++            let (stroke, core) = (
++                abgr(255, 214, 106, 0.35 + 0.5 * tw),
++                abgr(255, 246, 210, 0.55 + 0.45 * tw),
++            );
++            star(
++                &mut fill,
++                cx + c * r,
++                cy + s * r,
++                1.5 + 1.5 * tw,
++                stroke,
++                core,
++            );
++        }
++    }
++
++    if let Some(age) = burst {
++        for i in 0..5 {
++            let local = age - i as f32 * 0.10;
++            if !(0.0..0.70).contains(&local) {
++                continue;
++            }
++            let p = local / 0.70;
++            let ease = 1.0 - (1.0 - p) * (1.0 - p);
++            let alpha = (0.25 + 0.75 * (p * 5.0).min(1.0)) * (1.0 - p);
++            let (s, c) = (-1.1 + i as f32 * (TAU / 5.0)).sin_cos();
++            let dist = radius + 3.0 + (6.0 + (i % 2) as f32 * 3.0) * ease;
++            let arm = (1.5 + 2.5 * (p * PI).sin()) * (1.0 - 0.3 * p);
++            let (r, g, b) = if i % 2 == 0 {
++                (255, 244, 204)
++            } else {
++                (255, 210, 96)
++            };
++            star(
++                &mut fill,
++                cx + c * dist,
++                cy + s * dist,
++                arm,
++                abgr(r, g, b, alpha * 0.9),
++                abgr(255, 252, 232, alpha),
++            );
++        }
++    }
++}
++
++struct ChapterView {
++    root: usize,
++    nodes: Vec<(usize, (i32, i32))>,
++}
++
++struct JournalCatalog {
++    tree: Arc<Tree>,
++    chapters: Vec<ChapterView>,
++    members: std::collections::HashSet<usize>,
++}
++
++
++fn auto_position(depth: usize, ordinal: usize) -> (i32, i32) {
++    const COLUMN_SPACING: i32 = 50;
++    const ROW_SPACING: i32 = 32;
++
++    let x = i32::try_from(depth)
++        .unwrap_or(i32::MAX)
++        .saturating_mul(COLUMN_SPACING);
++
++    let y = if ordinal == 0 {
++        0
++    } else if ordinal % 2 == 1 {
++        let step = i32::try_from(ordinal / 2 + 1).unwrap_or(i32::MAX);
++        step.saturating_mul(ROW_SPACING)
++    } else {
++        let step = i32::try_from(ordinal / 2).unwrap_or(i32::MAX);
++        step.saturating_mul(-ROW_SPACING)
++    };
++
++    (x, y)
++}
++
++impl JournalCatalog {
++    fn from_tree(tree: Arc<Tree>) -> Self {
++        use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
++        let children = tree.children();
++        let mut roots: Vec<_> = tree.list.iter().enumerate().filter_map(|(index, a)| {
++            let config = a.display.as_ref()?.title.get("horizon:chapter_v1")?;
++            Some((config["order"].as_i64().unwrap_or(0), a.id.clone(), index))
++        }).collect();
++        roots.sort();
++        let mut chapters = Vec::new();
++        let mut members = HashSet::new();
++        for (_, _, root) in roots {
++            let config = &tree.list[root].display.as_ref().unwrap().title["horizon:chapter_v1"];
++            let explicit: BTreeMap<_, _> = config["positions"].as_object().into_iter().flatten()
++                .filter_map(|(id, xy)| Some((id.as_str(), (i32::try_from(xy[0].as_i64()?).ok()?, i32::try_from(xy[1].as_i64()?).ok()?))))
++                .collect();
++            let mut occupied: BTreeSet<_> = explicit.values().copied().collect();
++            let mut next_row = BTreeMap::<usize, usize>::new();
++            let mut queue = VecDeque::from([(root, 0usize)]);
++            let mut nodes = Vec::new();
++            while let Some((index, depth)) = queue.pop_front() {
++                if !members.insert(index) { continue; }
++                let adv = &tree.list[index];
++                if adv.display.is_some() {
++                    let xy = explicit.get(adv.id.as_str()).copied().unwrap_or_else(|| {
++                        let ordinal = next_row.entry(depth).or_default();
++                        loop {
++                            let point = auto_position(depth, *ordinal);
++                            *ordinal += 1;
++                            if occupied.insert(point) { break point; }
++                        }
++                    });
++                    nodes.push((index, xy));
++                }
++                let mut kids = children[index].clone();
++                kids.sort_by(|a,b| tree.list[*a].id.cmp(&tree.list[*b].id));
++                queue.extend(kids.into_iter().map(|child| (child, depth+1)));
++            }
++            chapters.push(ChapterView { root, nodes });
++        }
++        Self { tree, chapters, members }
++    }
++}
++#[derive(Clone, Copy, PartialEq)]
++enum ClaimState { Locked, Ready, Claimed }
++
++impl Game<'_> {
++    // Only the fixed trigger name can cross the client/server boundary.
++    fn journal_claim(&self, i: usize) -> Option<(ClaimState, String)> {
++        let quest = &self.adv.tree.list[i];
++        let title = &quest.display.as_ref()?.title;
++        let objective = title.get("horizon:claim_v1")
++            .or_else(|| title.pointer("/extra/0/horizon:claim_v1"))?.as_str()?;
++        let suffix = objective.strip_prefix("qj")?;
++        if suffix.len() != 14 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
++        let (ns, path) = quest.id.split_once(':')?;
++        let receipt = format!("{ns}:journal_claim/{path}/receipt");
++        let earned = format!("{ns}:journal_claim/{path}/earned");
++        let state = if !self.adv_done(i) { ClaimState::Locked }
++            else if self.adv.progress.has(&earned, "done") && !self.adv.progress.has(&receipt, "done") { ClaimState::Ready }
++            else { ClaimState::Claimed };
++        Some((state, objective.to_owned()))
++    }
++}
++impl Game<'_> {
++    fn refresh_journal(&mut self) {
++        if self.adv_ui.journal.as_ref().is_some_and(|c| Arc::ptr_eq(&c.tree, &self.adv.tree)) { return; }
++        let catalog = JournalCatalog::from_tree(self.adv.tree.clone());
++        let active = self.adv_ui.map_chapter.as_ref();
++        if !catalog.chapters.iter().any(|ch| Some(&catalog.tree.list[ch.root].id) == active) {
++            self.adv_ui.map_chapter = catalog.chapters.first().map(|ch| catalog.tree.list[ch.root].id.clone());
++            self.adv_ui.map_pan = (0.0, 0.0);
++            self.adv_ui.map_selected = None;
++        }
++        self.adv_ui.journal = Some(catalog);
++    }
++    pub(super) fn journal_member(&mut self, index: usize) -> bool {
++        self.refresh_journal();
++        self.adv_ui.journal.as_ref().is_some_and(|catalog| catalog.members.contains(&index))
++            && self.adv.tree.list[index].parent.is_some()
++    }
++    fn current_chapter(&self) -> Option<(usize, &ChapterView)> {
++        let catalog = self.adv_ui.journal.as_ref()?;
++        let id = self.adv_ui.map_chapter.as_ref()?;
++        catalog.chapters.iter().enumerate().find(|(_,ch)| &catalog.tree.list[ch.root].id == id)
++    }
++    fn journal_xy(&self, w: f32, h: f32, dx: i32, dy: i32) -> (f32, f32) {
++        let fold = (w * 0.5).floor();
++        let scale = ((fold - 42.0) / 255.0).min((h - 79.0) / 158.0).clamp(0.30, 1.8);
++        ((fold + 11.0) * 0.5 + self.adv_ui.map_pan.0 + dx as f32 * scale,
++         h * 0.51 + self.adv_ui.map_pan.1 + dy as f32 * scale)
++    }
++
++    fn journal_hit(&self, w: f32, h: f32) -> Option<usize> {
++        if self.cursor.0 < 15.0 || self.cursor.0 >= (w*0.5).floor()-4.0 || self.cursor.1 < 30.0 || self.cursor.1 >= h-24.0 { return None; }
++        let (_, chapter) = self.current_chapter()?;
++        chapter.nodes.iter().find_map(|&(index,(dx,dy))| {
++            let (x,y) = self.journal_xy(w,h,dx,dy);
++            if self.adv.tree.list[index].display.as_ref().is_some_and(|d| d.hidden && !self.adv_done(index)) { return None; }
++            let radius = if index == chapter.root { 15.0 } else { 11.0 };
++            ((self.cursor.0-x).hypot(self.cursor.1-y) <= radius).then_some(index)
++        })
++    }
++
++    fn draw_journal(&mut self, batch: &mut HudBatch) {
++        let (w,h) = (batch.width,batch.height);
++        let tree = self.adv.tree.clone();
++        self.refresh_journal();
++        let Some((chapter_no,chapter)) = self.current_chapter() else {
++            self.adv_ui.map_open = false;
++            return;
++        };
++        let chapter_root = chapter.root;
++        let chapter_count = self.adv_ui.journal.as_ref().unwrap().chapters.len();
++        let nodes: Vec<_> = chapter.nodes.iter().copied()
++            .filter(|(i,_)| tree.list[*i].display.as_ref().is_some_and(|d| !d.hidden || self.adv_done(*i)))
++            .map(|(i,(dx,dy))| (i,self.journal_xy(w,h,dx,dy))).collect();
++        let now = Instant::now();
++        let elapsed = self.adv_ui.map_opened_at.map_or(0.0, |start| now.duration_since(start).as_secs_f32());
++        let hover = self.journal_hit(w,h);
++        let selected = self.adv_ui.map_selected.as_ref().and_then(|id| tree.list.iter().position(|a| &a.id == id));
++        let atlas = &self.gui.atlas;
++        let fold = (w * 0.5).floor();
++        let left = 10.0;
++        let top = 6.0;
++        let right = w - left;
++        let bottom = h - 14.0;
++        let ink = 0xff344332;
++        let paper = 0xffbfe2ec;
++        // Two rigid oxblood boards project beyond the paper. The spine straps and
++        // brass corner guards sit on the case, outside the interactive map.
++        let bx = left - 4.0;
++        let by = top - 4.0;
++        let bw = right - bx + 4.0;
++        let bh = bottom - by + 4.0;
++        let leather = 0xff324076;
++        let tooling = 0xff51649a;
++        let brass = 0xff699ac4;
++        let light = 0xff9dcbe7;
++        batch.fill(atlas,bx+3.0,by+5.0,bw,bh,0x77302222);
++        batch.fill(atlas,bx,by,bw,bh,0xff25233b);
++        batch.fill(atlas,bx+1.0,by+1.0,bw-2.0,bh-3.0,leather);
++        batch.fill(atlas,bx+2.0,by+2.0,bw-4.0,1.0,tooling);
++        batch.fill(atlas,bx+2.0,bottom+1.0,bw-4.0,1.0,tooling);
++        for x in [bx+2.0,bx+bw-3.0] {
++            batch.fill(atlas,x,by+3.0,1.0,bh-6.0,tooling);
++        }
++        batch.fill(atlas,fold-8.0,by-1.0,16.0,bh+2.0,0xff232139);
++        batch.fill(atlas,fold-6.0,by-1.0,12.0,bh+1.0,0xff374878);
++        for x in [fold-5.0,fold+3.0] {
++            batch.fill(atlas,x,by,2.0,bh+1.0,brass);
++        }
++        for (cx, dx) in [(bx,1.0), (bx+bw-1.0,-1.0)] {
++            for (cy, dy) in [(by,1.0), (by+bh-1.0,-1.0)] {
++                for row in 0..8 {
++                    let length = (8-row) as f32;
++                    let x = if dx > 0.0 { cx } else { cx-length+1.0 };
++                    batch.fill(atlas,x,cy+dy*row as f32,length,1.0,brass);
++                }
++                batch.fill(atlas,cx+2.0*dx,cy+2.0*dy,1.0,1.0,light);
++            }
++        }
++        batch.fill(atlas,left+2.0,top+1.0,right-left-4.0,bottom-top-2.0,0xff6d8f9d);
++        for row in 0..3 {
++            batch.fill(atlas,left+3.0,bottom-2.0-2.0*row as f32,right-left-6.0,1.0,0xffb5ccda);
++        }
++        batch.fill(atlas,left+4.0,top+3.0,fold-left-4.0,bottom-top-10.0,paper);
++        batch.fill(atlas,fold,top+3.0,right-fold-4.0,bottom-top-10.0,0xffc6e8f1);
++        // A shallow paper shadow blends into either leaf; keep the brass on the case.
++        for (i, shade) in [0xffbde0ea, 0xffb9dce7, 0xffb4d6e2,
++                           0xffb9dbe7, 0xffbfe1eb, 0xffc3e5ef].into_iter().enumerate() {
++            batch.fill(atlas,fold-3.0+i as f32,top+3.0,1.0,bottom-top-10.0,shade);
++        }
++        for row in 0..4 {
++            let y=bottom+4.0+row as f32;
++            let wing=(4-row) as f32;
++            batch.fill(atlas,right-28.0,y,wing,1.0,0xff496e42);
++            batch.fill(atlas,right-20.0-wing,y,wing,1.0,0xff496e42);
++        }
++        batch.fill(atlas,right-28.0,bottom-7.0,8.0,11.0,0xff496e42);
++        let map_start = batch.vertices.len();
++        let positions: std::collections::HashMap<_, _> = nodes.iter().copied().collect();
++        for &(i,(x,y)) in &nodes {
++            let Some(parent) = tree.list[i].parent.as_ref().and_then(|id| tree.by_id.get(id)) else { continue };
++            let Some(&(px,py)) = positions.get(parent) else { continue };
++            let length = (x-px).hypot(y-py);
++            if length < 1.0 { continue; }
++            let (ux,uy) = ((x-px)/length,(y-py)/length);
++            // Clip along the line before emitting pixels for distant data-defined nodes.
++            let mut start = 0.0_f32;
++            let mut end = length;
++            for (origin, unit, limit) in [(px,ux,w), (py,uy,h)] {
++                if unit.abs() < f32::EPSILON {
++                    if origin < -3.0 || origin > limit+3.0 { end = -1.0; }
++                } else {
++                    let a = (-3.0-origin)/unit;
++                    let b = (limit+3.0-origin)/unit;
++                    start = start.max(a.min(b));
++                    end = end.min(a.max(b));
++                }
++            }
++            for s in start.ceil() as i32..=end.floor() as i32 {
++                let step = s as f32;
++                let (cx,cy) = (px+ux*step,py+uy*step);
++                batch.fill(atlas,cx,cy,2.0,2.0,0xff72909a);
++                if s % 9 == 4 {
++                    for offset in [-1.0,1.0] {
++                        batch.fill(atlas,cx-ux-uy*offset,cy-uy+ux*offset,1.5,1.5,0xff92acba);
++                    }
++                }
++            }
++        }
++        for &(i,(x,y)) in &nodes {
++            if x < -32.0 || y < -32.0 || x > w+32.0 || y > h+32.0 { continue; }
++            let atlas = &self.gui.atlas;
++            let Some(d) = &tree.list[i].display else { continue };
++            let done = self.adv_done(i);
++            let target = if tree.list[i].parent.is_none() { 12 } else { 9 };
++            let age = self.adv.journal_arrivals.get_mut(&tree.list[i].id)
++                .map(|t| now.duration_since(*t.get_or_insert(now)).as_secs_f32());
++            let reveal = (age.unwrap_or(1.0)/0.65).clamp(0.0,1.0);
++            let radius = ((target as f32)*(0.2+0.8*(1.0-(1.0-reveal).powi(3)))).round() as i32;
++            let rim = if Some(i)==hover || Some(i)==selected {0xffffe4ae} else if done {0xffe5ba68} else {0xff99a8a4};
++            for row in -radius..=radius {
++                let extent = (((radius*radius-row*row) as f32).sqrt()).floor();
++                batch.fill(atlas,x-extent,y+row as f32,extent*2.0+1.0,1.0,rim);
++                let inside = (radius-1)*(radius-1)-row*row;
++                if inside >= 0 {
++                    let edge = (inside as f32).sqrt().floor();
++                    batch.fill(atlas,x-edge,y+row as f32,edge*2.0+1.0,1.0,if done {0xff52503c} else {0xff374244});
++                }
++            }
++            let completion_age = self.adv.journal_bursts.get_mut(&tree.list[i].id).map(|started| {
++                now.duration_since(*started.get_or_insert(now)).as_secs_f32()
++            });
++            journal_effects(
++                |left, top, width, height, color| batch.fill(atlas, left, top, width, height, color),
++                (x, y), radius as f32, hover.or(selected) == Some(i), elapsed, age.filter(|a| *a < 1.2).or(completion_age),
++            );
++            if reveal > 0.25 { self.draw_item(batch,&ItemStack::new(&d.icon,1),x-8.0,y-8.0); }
++            if matches!(self.journal_claim(i),Some((ClaimState::Ready,_))) {
++                // A freestanding gilt pixel glyph with a stepped tip and separate dot.
++                let ox = (x+6.0).round();
++                let oy = (y-14.0).round();
++                let sprite = [b".ooo.", b"ohhgo", b"ohggo", b".oggo", b".ogo.",
++                              b"..o..", b".....", b".ooo.", b".ohgo", b"..oo."];
++                for (row, pixels) in sprite.iter().enumerate() {
++                    for (column, pixel) in pixels.iter().enumerate() {
++                        let color = match pixel {
++                            b'o' => 0xff264262, // dark umber outline
++                            b'g' => 0xff38b8f5, // gold
++                            b'h' => 0xffa4ebff, // lit upper-left face
++                            _ => continue,
++                        };
++                        batch.fill(&self.gui.atlas,ox+column as f32,oy+row as f32,1.0,1.0,color);
++                    }
++                }
++            } else if done {
++                batch.text_styled(&self.gui.atlas,&Text::literal("+"),x+5.0,y+4.0,0xffffd887,true);
++            }
++        }
++        self.adv.journal_bursts.retain(|_, started| started.is_none_or(|at| now.duration_since(at).as_secs_f32() < 1.2));
++        let atlas = &self.gui.atlas;
++        batch.clip_since(map_start,left+5.0,30.0,fold-4.0,bottom-10.0);
++        self.adv.journal_arrivals.retain(|_,t| t.is_none_or(|t| now.duration_since(t).as_secs_f32()<1.2));
++        let header = text_of(&tree.list[chapter_root].display.as_ref().unwrap().title);
++        let start = batch.vertices.len();
++        batch.text_styled(atlas,&header,left+9.0,top+6.0,ink,false);
++        batch.clip_since(start,left,top,if chapter_count > 1 { fold-55.0 } else { fold-9.0 },top+18.0);
++        if chapter_count > 1 {
++            let nav = Text::literal(format!("< {}/{} >",chapter_no+1,chapter_count));
++            batch.text_styled(atlas,&nav,fold-31.0-atlas.font.width_text(&nav)*0.5,top+6.0,ink,false);
++        }
++        let back = Text::literal("Advancements >");
++        batch.text_styled(atlas,&back,right-8.0-atlas.font.width_text(&back),top+6.0,ink,false);
++        batch.fill(atlas,left+9.0,top+18.0,fold-left-17.0,1.0,0xff91aeb6);
++        let detail = hover.or(selected).unwrap_or(chapter_root);
++        let quest = &tree.list[detail];
++        let d = quest.display.as_ref().unwrap();
++        let x=fold+10.0;
++        let width=(right-10.0-x).max(16.0);
++        batch.fill(atlas,x,top+18.0,width,1.0,0xff91aeb6);
++        let start=batch.vertices.len();
++        self.draw_item(batch,&ItemStack::new(&d.icon,1),x,top+31.0);
++        let atlas=&self.gui.atlas;
++        let (have,total)=self.adv.progress.counts(quest);
++        let state=if self.adv_done(detail) { "Complete".to_owned() } else {format!("{have}/{total}")};
++        let mut y=top+30.0;
++        for line in atlas.font.split(&text_of(&d.title),(width-22.0).max(12.0)) {
++            batch.text_styled(atlas,&line,x+22.0,y,ink,false);
++            y+=10.0;
++        }
++        batch.text_styled(atlas,&Text::literal(state),x+22.0,y,0xff53654d,false);
++        y+=19.0;
++        for line in atlas.font.split(&text_of(&d.description),width) {
++            batch.text_styled(atlas,&line,x,y,0xff46533f,false);
++            y+=10.0;
++        }
++        let claim = self.journal_claim(detail);
++        let limit = if claim.is_some() { h-46.0 } else { bottom-8.0 };
++        batch.clip_since(start,x,top+21.0,right-5.0,limit);
++        if let Some((state,_)) = claim {
++            let (label,bg,fg) = match state {
++                ClaimState::Locked => ("Reward locked",0xffafc7ce,ink),
++                ClaimState::Ready => ("Claim reward",0xff375a46,0xffd6effa),
++                ClaimState::Claimed => ("Claimed",0xffb8d4c5,ink),
++            };
++            batch.fill(atlas,x,h-43.0,width,17.0,bg);
++            let text = Text::literal(label);
++            batch.text_styled(atlas,&text,x+(width-atlas.font.width_text(&text))*0.5,h-39.0,fg,false);
++        }
++
+     }
+ }
+ 
+--- a/crates/horizon-client/src/game/functions.rs
++++ b/crates/horizon-client/src/game/functions.rs
+@@ -161,7 +161,9 @@
+     for (path, bytes) in contributed {
+         // One bad file would fail its whole table and drop the world's pack
+         // content with it, so it is skipped alone: every kind is JSON.
+-        if let Err(e) = serde_json::from_slice::<Box<serde_json::value::RawValue>>(&bytes) {
++        if !path.starts_with("progression_rule/")
++            && let Err(e) = serde_json::from_slice::<Box<serde_json::value::RawValue>>(&bytes)
++        {
+             log::warn!("Horizon: a native mod's data pack file {path} is not JSON, skipped: {e}");
+             continue;
+         }
+@@ -201,28 +203,27 @@
+         if self.fns.loaded || self.world_root.as_os_str().is_empty() {
+             return;
+         }
+-        self.reload_datapacks(false);
++        if let Err(e) = self.reload_datapacks(false) {
++            log::warn!("Data pack load failed: {e}");
++        }
+     }
+     /// `ServerFunctionLibrary.reload`: validate the candidate functions with
+     /// the current content before exposing them to execution.
+-    pub(super) fn reload_datapacks(&mut self, run_load: bool) {
++    pub(super) fn reload_datapacks(&mut self, run_load: bool) -> super::Result<()> {
+         let stack = pack_stack(
+             &self.world_root,
+             &self.options.resources,
+             self.cmds.vanilla_disabled,
+             &self.level.enabled_features,
+         );
++        let store = self.load_store();
++        if run_load {
++            self.reload_world_tables()?;
++        }
+         self.fns.packs = stack.packs;
+         self.fns.enabled = stack.enabled;
+-        let store = self.load_store();
+         self.fns.loaded = true;
+         self.fns.load_pending = true;
+-        // An explicit reload (`/reload`, `/datapack`) reloads the content
+-        // tables with the functions, as `ReloadableServerResources` does;
+-        // the lazy first load ran after the world already built them.
+-        if run_load {
+-            self.reload_world_tables();
+-        }
+         self.admit_store(store);
+         // The schedule is the world's live `TimerQueue` `SavedData`, not pack
+         // content: firing an event (`TimerQueue.tick`) and `/schedule clear`
+@@ -233,6 +234,7 @@
+             self.fns.schedule_loaded = true;
+             self.load_schedule();
+         }
++        Ok(())
+     }
+     fn load_store(&self) -> DataStore {
+         // The built-in pack first (lowest priority), unless disabled.
+@@ -995,8 +997,10 @@
+     }
+     /// ReloadCommand: the message, then the (asynchronous) reload; returns 0.
+     pub(super) fn cmd_reload(&mut self) -> R<i32> {
++        self.reload_datapacks(true).map_err(|e| {
++            horizon_client::command::CommandError::new(Text::literal(e.to_string()))
++        })?;
+         self.feedback(Text::translate("commands.reload.success", &[]));
+-        self.reload_datapacks(true);
+         Ok(0)
+     }
+     /// `PackLocationInfo.createChatLink`: the id decorated with its source
+@@ -1117,6 +1121,8 @@
+             Some(Arg::Str(n)) => Some(n.clone()),
+             _ => None,
+         };
++        let previous_enabled = self.fns.enabled.clone();
++        let previous_vanilla = self.cmds.vanilla_disabled;
+         let selected = self.selected_packs();
+         // `DataPackCommand.listAvailablePacks`: a feature pack the world's
+         // features do not cover is not available.
+@@ -1215,11 +1221,11 @@
+                     };
+                     self.fns.enabled.insert(position, name.clone());
+                 }
++                self.apply_pack_change(previous_enabled, previous_vanilla)?;
+                 self.feedback(Text::translate(
+                     "commands.datapack.modify.enable",
+                     &[self.pack_link(&name, true)],
+                 ));
+-                self.apply_pack_change();
+                 Ok(self.selected_packs().len() as i32)
+             }
+             _ => {
+@@ -1240,11 +1246,11 @@
+                 } else {
+                     self.fns.enabled.retain(|p| p != &name);
+                 }
++                self.apply_pack_change(previous_enabled, previous_vanilla)?;
+                 self.feedback(Text::translate(
+                     "commands.datapack.modify.disable",
+                     &[self.pack_link(&name, true)],
+                 ));
+-                self.apply_pack_change();
+                 Ok(self.selected_packs().len() as i32)
+             }
+         }
+@@ -1252,12 +1258,24 @@
+     /// `ReloadCommand.reloadPacks`: no message of its own. It reloads the
+     /// server's data as `/reload` does (`reload_datapacks`), the content
+     /// tables with the functions.
+-    fn apply_pack_change(&mut self) {
++    fn apply_pack_change(
++        &mut self,
++        previous_enabled: Vec<String>,
++        previous_vanilla: bool,
++    ) -> R<()> {
+         self.save_datapack_settings();
+         let store = self.load_store();
++        if let Err(e) = self.reload_world_tables() {
++            self.fns.enabled = previous_enabled;
++            self.cmds.vanilla_disabled = previous_vanilla;
++            self.save_datapack_settings();
++            return Err(horizon_client::command::CommandError::new(Text::literal(
++                e.to_string(),
++            )));
++        }
+         self.fns.load_pending = true;
+-        self.reload_world_tables();
+         self.admit_store(store);
++        Ok(())
+     }
+ 
+     // ---- predicates -------------------------------------------------------------------
+--- a/crates/horizon-client/src/game/inventory_slots.rs
++++ b/crates/horizon-client/src/game/inventory_slots.rs
+@@ -347,6 +347,15 @@
+         self.recipe_unlocked(&unlocked);
+     }
+     pub(super) fn craft_recipe(&self) -> Option<(String, ItemStack)> {
++        self.raw_craft_recipe().filter(|(_, stack)| {
++            self.world_tables
++                .as_ref()
++                .and_then(|t| t.crafting_rules.missing(&stack.item, &self.adv.progress))
++                .is_none()
++        })
++    }
++
++    pub(super) fn raw_craft_recipe(&self) -> Option<(String, ItemStack)> {
+         let n = self.craft_size;
+         let grid: Vec<Option<ItemStack>> = (0..n * n).map(|i| self.craft_grid[i].clone()).collect();
+         let scale = |id: i32| self.maps.data.get(&id).map(|m| m.scale);
+@@ -355,6 +364,23 @@
+             .find_with(&grid, n, &scale)
+             .map(|(name, result)| (name.to_owned(), result))
+     }
++    pub(super) fn locked_craft_icon(&self, slot: usize) -> Option<ItemStack> {
++        if let Some(r) = &self.remote {
++            let (window, result_slot, stack) = r.locked_preview.as_ref()?;
++            return (*window == r.menu.as_ref().map_or(0, |m| m.0) && *result_slot == slot)
++                .then(|| stack.clone());
++        }
++        if slot != 200 {
++            return None;
++        }
++        let (_, stack) = self.raw_craft_recipe()?;
++        self.world_tables
++            .as_ref()?
++            .crafting_rules
++            .missing(&stack.item, &self.adv.progress)?;
++        Some(stack)
++    }
++
+     pub(super) fn draw_inventory_slots(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {
+         let drag = self.drag_view();
+         for i in self.slots() {
+@@ -377,7 +403,28 @@
+                 );
+             }
+             let stack = self.slot_view(i);
+-            self.draw_slot_item(batch, drag.as_ref(), i, &stack, ox + sx, oy + sy);
++            let x = ox + sx;
++            let y = oy + sy;
++            if stack.is_none()
++                && let Some(preview) = self.locked_craft_icon(i)
++            {
++                self.draw_item(batch, &preview, x, y);
++                // Use the resource pack's barrier silhouette, with a one-pixel shadow
++                // to keep the ring visible against both light and dark item textures.
++                for (offset, tint) in [(1.0, rgba(53, 18, 22, 215)), (0.0, u32::MAX)] {
++                    batch.sprite_scaled(
++                        &self.gui.atlas,
++                        "item/barrier",
++                        x + 5.0 + offset,
++                        y + 5.0 + offset,
++                        10.0,
++                        10.0,
++                        tint,
++                    );
++                }
++            } else {
++                self.draw_slot_item(batch, drag.as_ref(), i, &stack, x, y);
++            }
+         }
+     }
+ 
+--- a/crates/horizon-client/src/game/lan_crafting.rs
++++ b/crates/horizon-client/src/game/lan_crafting.rs
+@@ -34,6 +34,8 @@
+ pub(super) struct GuestCrafting {
+     /// The inventory menu; its grid lives in the hub's guest.
+     inventory: Option<Box<Menu>>,
++    table_locked: bool,
++    sent_lock_preview: Option<(i32, usize, ItemStack)>,
+     /// The open crafting table: its window, state id, menu and block.
+     pub(super) table: Option<(i32, i32, Box<Menu>, [i32; 3])>,
+     /// The open furnace's or brewing stand's window and menu (`AbstractFurnaceMenu`,
+@@ -110,6 +112,49 @@
+             || self.ui.rules.bool("limited_crafting"),
+             |r| r.do_limited_crafting,
+         )
++    }
++
++    pub(super) fn craft_lock_message(
++        &self,
++        progress: &horizon_client::advancements::Progress,
++        stack: &ItemStack,
++    ) -> Option<horizon_client::text::Text> {
++        use horizon_client::text::Text;
++        let quest = self
++            .world_tables
++            .as_ref()?
++            .crafting_rules
++            .missing(&stack.item, progress)?;
++        let title = quest
++            .display
++            .as_ref()
++            .map(|d| super::advancements::text_of(&d.title))
++            .unwrap_or_else(|| Text::literal(&quest.id));
++        Some(Text::translate_with_fallback(
++            "horizon.quests.craft_locked",
++            "Complete %s to craft %s.",
++            &[
++                title,
++                Text::literal(self.pack.names.display_item(&stack.item)),
++            ],
++        ))
++    }
++
++    fn guest_craft_locked(&self, guest: &Guest, stack: &ItemStack) -> bool {
++        self.world_tables
++            .as_ref()
++            .and_then(|t| t.crafting_rules.missing(&stack.item, &guest.advancements))
++            .is_some()
++    }
++
++    fn guest_craft_hint(&self, host: &LanHost, gi: usize, stack: Option<&ItemStack>) {
++        let guest = &host.hub.guests[gi];
++        if let Some(reason) = stack.and_then(|s| self.craft_lock_message(&guest.advancements, s)) {
++            guest.send(&C::SystemChat(play::SystemChat {
++                content: horizon_client::lan::data::component_nbt(&reason.component()),
++                overlay: true,
++            }));
++        }
+     }
+ 
+     pub(super) fn menu_env(&self) -> Env<'_> {
+@@ -125,6 +170,10 @@
+             maps: None,
+             limited_crafting: self.limited_crafting(),
+             known_recipes: Some(&self.level.recipe_book),
++            actor_rules: self
++                .world_tables
++                .as_ref()
++                .map(|t| (&t.crafting_rules, &self.adv.progress)),
+         }
+     }
+ 
+@@ -161,6 +210,10 @@
+             maps: maps.as_ref().map(|m| m as &dyn horizon_client::menu::Maps),
+             limited_crafting: host.hub.limited_crafting,
+             known_recipes: Some(&host.hub.guests[gi].recipe_book),
++            actor_rules: self
++                .world_tables
++                .as_ref()
++                .map(|t| (&t.crafting_rules, &host.hub.guests[gi].advancements)),
+             ..self.menu_env()
+         };
+         load_player(menu, &host.hub.guests[gi]);
+@@ -231,6 +284,67 @@
+         result
+     }
+ 
++    fn guest_grid_click(
++        &mut self,
++        host: &mut LanHost,
++        gi: usize,
++        menu: &mut Menu,
++        p: &play::ContainerClick,
++        pos: Option<[i32; 3]>,
++        load: impl FnOnce(&mut Menu, &Env),
++    ) -> Vec<usize> {
++        let result_slot = match menu.kind() {
++            Kind::Inventory | Kind::Crafting => Some(0),
++            _ => menu.mod_crafting().map(|c| c.result),
++        };
++        let gated_take = result_slot.filter(|&s| p.slot as usize == s).filter(|_| {
++            self.world_tables
++                .as_ref()
++                .is_some_and(|t| !t.crafting_rules.is_empty())
++        });
++        let click = input(p.input);
++        let before = self.guest_menu_op(host, gi, menu, |menu, env| {
++            load(menu, env);
++            let before = (0..menu.slot_count())
++                .map(|s| menu.slot(s).cloned())
++                .collect::<Vec<_>>();
++            if gated_take.is_none() {
++                let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), click);
++            } else {
++                menu.recompute(env);
++            }
++            before
++        });
++        if let Some(slot) = gated_take {
++            let (uuid, name) = (host.hub.guests[gi].uuid, host.hub.guests[gi].name.clone());
++            let mut first = None;
++            loop {
++                let mut output = menu.slot(slot).cloned();
++                self.native_prepare_item_craft(uuid, &name, pos, &mut output);
++                let Some(stack) = output.as_ref() else { break };
++                if first.as_ref().is_some_and(|id| id != &stack.item) {
++                    break;
++                }
++                first = Some(stack.item.clone());
++                self.guest_craft_hint(host, gi, Some(stack));
++                let made = self.guest_menu_op(host, gi, menu, |menu, env| {
++                    menu.set_slot(env, slot, output);
++                    let _ = menu.click_one(env, i32::from(p.slot), i32::from(p.button), click);
++                    let made = !menu.item_crafted.is_empty();
++                    menu.recompute(env);
++                    made
++                });
++                if !made || !(click == Input::QuickMove || (click == Input::Throw && p.button == 1))
++                {
++                    break;
++                }
++            }
++        }
++        (0..menu.slot_count())
++            .filter(|&s| menu.slot(s) != before[s].as_ref())
++            .collect()
++    }
++
+     /// A click on the guest's inventory menu (window 0): `InventoryMenu`,
+     /// crafting grid included. False for other windows.
+     pub(super) fn lan_inventory_click(
+@@ -255,29 +369,25 @@
+             .take()
+             .unwrap_or_else(|| Box::new(Menu::new(Kind::Inventory)));
+         let grid = host.hub.guests[gi].craft_grid.clone();
+-        let changed = self.guest_menu_op(host, gi, &mut menu, |menu, env| {
++        let changed = self.guest_grid_click(host, gi, &mut menu, p, None, |menu, env| {
+             for (k, s) in grid.into_iter().enumerate() {
+                 menu.set_slot(env, 1 + k, s);
+             }
+-            let before: Vec<_> = (0..menu.slot_count())
+-                .map(|s| menu.slot(s).cloned())
+-                .collect();
+-            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
+-            (0..menu.slot_count())
+-                .filter(|&s| menu.slot(s) != before[s].as_ref())
+-                .collect::<Vec<_>>()
+         });
+         let guest = &host.hub.guests[gi];
+         let (uuid, name) = (guest.uuid, guest.name.clone());
+         let mut result = menu.slot(0).cloned();
+         self.native_prepare_item_craft(uuid, &name, None, &mut result);
++        let visible = result
++            .clone()
++            .filter(|s| !self.guest_craft_locked(guest, s));
+         let env = self.menu_env();
+         menu.set_slot(&env, 0, result);
+         let g = &mut host.hub.guests[gi];
+         for k in 0..4 {
+             g.craft_grid[k] = menu.slot(1 + k).cloned();
+         }
+-        g.craft_result = menu.slot(0).cloned();
++        g.craft_result = visible;
+         host.play.entry(conn).or_default().crafting.inventory = Some(menu);
+         host.hub.inventory_clicked(conn, p, &self.world, &changed);
+         true
+@@ -382,32 +492,32 @@
+         // A crafting grid's result is what the guest was shown, the mods' say
+         // included, while the grid is as it was then.
+         let shown = Self::lan_mod_craft_shown(host, gi, &items);
+-        let mut changed = self.guest_menu_op(host, gi, &mut menu, |menu, env| {
+-            if matches!(kind, Kind::Mod(_)) {
+-                menu.load_container(env, &items);
+-                if let Some((slot, result)) = shown {
+-                    menu.set_slot(env, slot, result);
+-                }
+-            } else {
+-                for (k, s) in items.iter().enumerate() {
+-                    menu.set_slot(env, k, s.clone());
+-                }
+-            }
+-            // After the slots: setting a disabled slot (CrafterBlockEntity.setItem) enables it.
+-            if let Some((disabled, triggered)) = crafter_data {
+-                for (k, d) in disabled.iter().enumerate() {
+-                    menu.data[k] = i32::from(*d);
+-                }
+-                menu.data[9] = i32::from(triggered);
+-            }
+-            let before: Vec<_> = (0..menu.slot_count())
+-                .map(|s| menu.slot(s).cloned())
+-                .collect();
+-            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
+-            (0..menu.slot_count())
+-                .filter(|&s| menu.slot(s) != before[s].as_ref())
+-                .collect::<Vec<_>>()
+-        });
++        let mut changed = self.guest_grid_click(
++            host,
++            gi,
++            &mut menu,
++            p,
++            Some([pos.0, pos.1, pos.2]),
++            |menu, env| {
++                if matches!(kind, Kind::Mod(_)) {
++                    menu.load_container(env, &items);
++                    if let Some((slot, result)) = shown {
++                        menu.set_slot(env, slot, result);
++                    }
++                } else {
++                    for (k, s) in items.iter().enumerate() {
++                        menu.set_slot(env, k, s.clone());
++                    }
++                }
++                // After the slots: setting a disabled slot (CrafterBlockEntity.setItem) enables it.
++                if let Some((disabled, triggered)) = crafter_data {
++                    for (k, d) in disabled.iter().enumerate() {
++                        menu.data[k] = i32::from(*d);
++                    }
++                    menu.data[9] = i32::from(triggered);
++                }
++            },
++        );
+         let mut linked_after = Vec::new();
+         match self.world.block_entities.get_mut(&pos) {
+             Some(BlockEntity::Furnace(f)) => {
+@@ -703,11 +813,16 @@
+                 }
+                 apply(menu, env)
+             });
++            let guest = &host.hub.guests[gi];
++            let mut result = menu.slot(0).cloned();
++            self.native_prepare_item_craft(guest.uuid, &guest.name, None, &mut result);
++            menu.set_slot(&self.menu_env(), 0, result.clone());
++            let visible = result.filter(|s| !self.guest_craft_locked(guest, s));
+             let g = &mut host.hub.guests[gi];
+             for k in 0..4 {
+                 g.craft_grid[k] = menu.slot(1 + k).cloned();
+             }
+-            g.craft_result = menu.slot(0).cloned();
++            g.craft_result = visible;
+             host.play.entry(conn).or_default().crafting.inventory = Some(menu);
+             host.hub.send_inventory(gi);
+             placed
+@@ -717,6 +832,10 @@
+                 .get_mut(&conn)
+                 .and_then(|play| play.crafting.table.take_if(|(w, ..)| *w == container))?;
+             let placed = self.guest_menu_op(host, gi, &mut menu, apply);
++            let guest = &host.hub.guests[gi];
++            let mut result = menu.slot(0).cloned();
++            self.native_prepare_item_craft(guest.uuid, &guest.name, Some(pos), &mut result);
++            menu.set_slot(&self.menu_env(), 0, result);
+             host.play.entry(conn).or_default().crafting.table = Some((window, state, menu, pos));
+             self.lan_send_table_content(host, conn);
+             placed
+@@ -766,15 +885,7 @@
+             && !host.hub.guests[gi].spectator()
+             && self.lan_table_valid(&host.hub.guests[gi], pos)
+         {
+-            let mut changed = self.guest_menu_op(host, gi, &mut menu, |menu, env| {
+-                let before: Vec<_> = (0..menu.slot_count())
+-                    .map(|s| menu.slot(s).cloned())
+-                    .collect();
+-                let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
+-                (0..menu.slot_count())
+-                    .filter(|&s| menu.slot(s) != before[s].as_ref())
+-                    .collect::<Vec<_>>()
+-            });
++            let mut changed = self.guest_grid_click(host, gi, &mut menu, p, Some(pos), |_, _| {});
+             let guest = &host.hub.guests[gi];
+             let (uuid, name) = (guest.uuid, guest.name.clone());
+             let mut result = menu.slot(0).cloned();
+@@ -785,7 +896,11 @@
+             }
+             let env = self.menu_env();
+             menu.set_slot(&env, 0, result);
+-            agreed = p.state == state
++            let locked = menu
++                .slot(0)
++                .is_some_and(|s| self.guest_craft_locked(guest, s));
++            agreed = !locked
++                && p.state == state
+                 && host.hub.click_agreed(
+                     gi,
+                     p,
+@@ -1025,8 +1140,15 @@
+         if changed {
+             menu.set_slot(&self.menu_env(), c.result, result.clone());
+         }
++        let locked = result
++            .as_ref()
++            .is_some_and(|s| self.guest_craft_locked(guest, s));
+         if let Some(m) = host.hub.guests[gi].menu.as_mut() {
+-            m.craft = Some(ModCraft { grid, result });
++            m.craft = Some(ModCraft {
++                grid,
++                result,
++                locked,
++            });
+         }
+         changed.then_some(c.result)
+     }
+@@ -1053,7 +1175,17 @@
+             };
+             let mut items = m.items.clone();
+             items.resize(t.slots, None);
+-            if Self::lan_mod_craft_shown(host, gi, &items).is_some() {
++            if let Some((_, result)) = Self::lan_mod_craft_shown(host, gi, &items) {
++                let locked = result
++                    .as_ref()
++                    .is_some_and(|s| self.guest_craft_locked(g, s));
++                if let Some(craft) = host.hub.guests[gi]
++                    .menu
++                    .as_mut()
++                    .and_then(|m| m.craft.as_mut())
++                {
++                    craft.locked = locked;
++                }
+                 continue;
+             }
+             let mut menu = Menu::new(Kind::Mod(t));
+@@ -1067,6 +1199,70 @@
+     /// `ServerPlayer.tick`'s `stillValid`: a guest's crafting table closes
+     /// once it is gone or out of reach, giving its grid back.
+     pub(super) fn lan_tables_tick(&mut self, host: &mut LanHost) {
++        // A grant, revoke, or rule reload may change an open window's result.
++        // Keep the prepared stack for the transaction and filter only the wire slot.
++        for gi in 0..host.hub.guests.len() {
++            let g = &host.hub.guests[gi];
++            let conn = g.conn;
++            let Some(play) = host.play.get_mut(&conn) else {
++                continue;
++            };
++            // A locked result is drawn separately from the empty, authoritative slot.
++            let preview = if let Some((window, _, menu, _)) = &play.crafting.table {
++                menu.slot(0).map(|s| (*window, 0, s))
++            } else if let Some(menu) = &g.menu {
++                menu.mod_type.and_then(|t| t.crafting).and_then(|grid| {
++                    Some((
++                        menu.window,
++                        grid.result,
++                        menu.craft.as_ref()?.result.as_ref()?,
++                    ))
++                })
++            } else {
++                play.crafting
++                    .inventory
++                    .as_ref()
++                    .filter(|m| (0..4).all(|k| m.slot(1 + k) == g.craft_grid[k].as_ref()))
++                    .and_then(|m| m.slot(0))
++                    .map(|s| (0, 0, s))
++            }
++            .filter(|(_, _, s)| self.guest_craft_locked(g, s));
++            let previous = play
++                .crafting
++                .sent_lock_preview
++                .as_ref()
++                .map(|(w, slot, s)| (*w, *slot, s));
++            if preview != previous {
++                let mut wire = horizon_protocol::buf::Writer::new();
++                if let Some((window, slot, s)) = preview {
++                    wire.i32(window);
++                    wire.i32(slot as i32);
++                    wire.nbt(&horizon_items::item_nbt::item_to_nbt(s));
++                }
++                g.send(&C::CustomPayload(
++                    horizon_protocol::packets::configuration::CustomPayload {
++                        channel: super::remote::CRAFT_LOCK_PREVIEW.into(),
++                        data: wire.data,
++                    },
++                ));
++                play.crafting.sent_lock_preview = preview.map(|(w, slot, s)| (w, slot, s.clone()));
++            }
++            if let Some((_, _, menu, _)) = &play.crafting.table {
++                let locked = menu.slot(0).is_some_and(|s| self.guest_craft_locked(g, s));
++                if locked != play.crafting.table_locked {
++                    self.lan_send_table_content(host, conn);
++                }
++            } else if g.menu.is_none()
++                && let Some(menu) = &play.crafting.inventory
++                && (0..4).all(|k| menu.slot(1 + k) == g.craft_grid[k].as_ref())
++            {
++                let visible = menu.slot(0).filter(|s| !self.guest_craft_locked(g, s));
++                if visible != g.craft_result.as_ref() {
++                    host.hub.guests[gi].craft_result = visible.cloned();
++                    host.hub.send_inventory(gi);
++                }
++            }
++        }
+         let invalid: Vec<(u32, i32)> = host
+             .play
+             .iter()
+@@ -1108,6 +1304,13 @@
+         let (window, state) = (*window, *state);
+         let mut items: Vec<Option<ItemStack>> = (0..10).map(|s| menu.slot(s).cloned()).collect();
+         let g = &host.hub.guests[gi];
++        let locked = items[0]
++            .as_ref()
++            .is_some_and(|s| self.guest_craft_locked(g, s));
++        if locked {
++            items[0] = None;
++        }
++        host.play.get_mut(&conn).unwrap().crafting.table_locked = locked;
+         items.extend((9..36).chain(0..9).map(|i| g.inventory[i].clone()));
+         let carried = g.carried.clone();
+         let items = items.iter().map(|s| host.hub.stack(s)).collect();
+--- a/crates/horizon-client/src/game/lan_trading.rs
++++ b/crates/horizon-client/src/game/lan_trading.rs
+@@ -284,6 +284,10 @@
+             maps: None,
+             limited_crafting: host.hub.limited_crafting,
+             known_recipes: Some(&host.hub.guests[gi].recipe_book),
++            actor_rules: self
++                .world_tables
++                .as_ref()
++                .map(|t| (&t.crafting_rules, &host.hub.guests[gi].advancements)),
+         };
+         let mut menu = Menu::new(Kind::Merchant);
+         {
+--- a/crates/horizon-client/src/game/menu_clicks.rs
++++ b/crates/horizon-client/src/game/menu_clicks.rs
+@@ -493,6 +493,10 @@
+                 .map(|m| m as &dyn horizon_client::menu::Maps),
+             limited_crafting: self.limited_crafting(),
+             known_recipes: Some(&self.level.recipe_book),
++            actor_rules: self
++                .world_tables
++                .as_ref()
++                .map(|t| (&t.crafting_rules, &self.adv.progress)),
+         };
+         menu.creative = creative;
+         menu.selected = self.selected;
+@@ -795,6 +799,12 @@
+         // Changing the input restarts cooking (AbstractFurnaceBlockEntity.setItem).
+         let furnace_input = (is_furnace && slot == 300).then(|| self.slot_mut(300).clone());
+         if slot == 200 {
++            if let Some((_, stack)) = self.raw_craft_recipe()
++                && let Some(reason) = self.craft_lock_message(&self.adv.progress, &stack)
++            {
++                self.send_overlay_message(reason);
++                return;
++            }
+             // ResultSlot: take the crafted stack and consume one of each ingredient.
+             let mut crafted = 0;
+             while let Some((recipe, result)) = self.craft_recipe() {
+--- a/crates/horizon-client/src/game/mods.rs
++++ b/crates/horizon-client/src/game/mods.rs
+@@ -714,7 +714,10 @@
+             if g.world_root.as_os_str().is_empty() {
+                 return;
+             }
+-            g.reload_datapacks(true);
++            if let Err(e) = g.reload_datapacks(true) {
++                log::warn!("Horizon: content mod reload failed: {e}");
++                return;
++            }
+             log::info!(
+                 "Horizon: content mods switched live: server data reloaded in {} ms",
+                 at.elapsed().as_millis()
+--- a/crates/horizon-client/src/game/recipe_book.rs
++++ b/crates/horizon-client/src/game/recipe_book.rs
+@@ -316,6 +316,10 @@
+                 maps: None,
+                 limited_crafting: self.limited_crafting(),
+                 known_recipes: Some(&self.level.recipe_book),
++                actor_rules: self
++                    .world_tables
++                    .as_ref()
++                    .map(|t| (&t.crafting_rules, &self.adv.progress)),
+             };
+             for i in 0..36 {
+                 menu.set_player_item(i, self.inventory[i].clone());
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -146,6 +146,8 @@
+ }
+ 
+ /// A text component the server sent, for the HUD.
++pub(super) const CRAFT_LOCK_PREVIEW: &str = "horizon:craft_lock_preview";
++
+ pub(super) fn remote_text(tag: &Tag) -> horizon_client::text::Text {
+     use horizon_client::scoreboard::{comp_text, tag_to_json};
+     comp_text(&tag_to_json(tag))
+@@ -629,6 +631,7 @@
+     /// The crafting result slot of the open menu as the server last set it
+     /// (`CraftingMenu.slotChangedCraftingGrid`): the client never computes it.
+     pub(super) craft_result: Option<ItemStack>,
++    pub(super) locked_preview: Option<(i32, usize, ItemStack)>,
+     /// The open menu's title as the server named it, with its styles.
+     pub(super) menu_title: Option<horizon_client::text::Text>,
+     state_id: i32,
+@@ -1205,6 +1208,7 @@
+             ticked_before_player: std::collections::HashSet::new(),
+             menu: None,
+             craft_result: None,
++            locked_preview: None,
+             menu_title: None,
+             state_id: 0,
+             use_target: None,
+@@ -1435,6 +1439,7 @@
+             ticked_before_player: std::collections::HashSet::new(),
+             menu: None,
+             craft_result: None,
++            locked_preview: None,
+             menu_title: None,
+             state_id: 0,
+             use_target: None,
+@@ -3191,6 +3196,21 @@
+             // ClientCommonPacketListenerImpl.handlePing runs on the game
+             // thread, after all preceding packets (especially teleports).
+             C::Ping(p) => self.send(S::Pong(p)),
++            C::CustomPayload(p) if p.channel == CRAFT_LOCK_PREVIEW => {
++                let (window, menu) = self.remote_menu();
++                let mut wire = horizon_protocol::buf::Reader::new(&p.data);
++                let preview = (|| {
++                    if wire.i32().ok()? != window {
++                        return None;
++                    }
++                    let slot = Self::menu_slot(&menu, wire.i32().ok()?)?;
++                    let item = horizon_items::item_nbt::item_from_nbt(&wire.nbt().ok()?)?;
++                    Some((window, slot, item))
++                })();
++                if let Some(r) = self.remote.as_mut() {
++                    r.locked_preview = preview;
++                }
++            }
+             // A native mod's server half to its client half.
+             C::CustomPayload(p) if p.channel == horizon_protocol::mod_net::CHANNEL => {
+                 self.remote_native_net(&p.data);
+@@ -12954,6 +12974,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         let mut menu = Menu::new(Kind::Inventory);
+         let cobblestone = ItemStack {
+--- a/crates/horizon-client/src/game/world_entry.rs
++++ b/crates/horizon-client/src/game/world_entry.rs
+@@ -263,6 +263,32 @@
+         // hold its files so it is read once.
+         let _recipe_files = horizon_client::json_folder::read(&root.join("data/minecraft/recipe"));
+         let recipes = Recipes::load(root, &items, &overlay)?;
++        let crafting_rules = if overlay.kind("progression_rule").next().is_some() {
++            let tree = horizon_client::advancements::Tree::shared(&root.join("data"), &overlay);
++            horizon_client::advancements::crafting_rules::CraftingRules::load(
++                &overlay,
++                &tree,
++                |id| items.get(id).is_some(),
++            )
++            .map_err(|(id, why)| {
++                let (namespace, name) = id.split_once(':').unwrap_or(("", &id));
++                let path = format!("data/{namespace}/progression_rule/{name}.json");
++                let stack = functions::pack_stack(
++                    &self.world_root,
++                    root,
++                    self.cmds.vanilla_disabled,
++                    enabled_features,
++                );
++                let pack = stack
++                    .enabled_packs()
++                    .filter(|p| p.list_folder("progression_rule").contains(&path))
++                    .last()
++                    .map_or("native mod", |p| p.id.as_str());
++                UsageError(format!("{pack}, {path} ({id}): {why}"))
++            })?
++        } else {
++            Default::default()
++        };
+         let stations = horizon_client::stations::StationData::load(root, &items, &overlay);
+         let mut data_map_types = Vec::new();
+         self.native_data_map_types(&mut data_map_types);
+@@ -299,6 +325,7 @@
+             .collect();
+         Ok((
+             Some(WorldTables {
++                crafting_rules,
+                 suffocation,
+                 files,
+                 items,
+@@ -312,20 +339,13 @@
+     }
+     /// Reload the content tables with the world's packs, as
+     /// `/reload` reloads a server's (`ReloadableServerResources`).
+-    pub(super) fn reload_world_tables(&mut self) {
++    pub(super) fn reload_world_tables(&mut self) -> Result<()> {
+         if self.remote.is_some() {
+-            return;
+-        }
+-        match self.build_world_tables(true, &self.level.enabled_features) {
+-            Ok((tables, health)) => {
+-                self.world_tables = tables;
+-                self.health_resources = health;
+-            }
+-            Err(e) => {
+-                log::warn!("Horizon: the world's data packs are not applied: {e}");
+-                return;
+-            }
+-        }
++            return Ok(());
++        }
++        let (tables, health) = self.build_world_tables(true, &self.level.enabled_features)?;
++        self.world_tables = tables;
++        self.health_resources = health;
+         self.damage_tag_generation = self.damage_tag_generation.wrapping_add(1);
+         self.recipe_tables.categories = None;
+         horizon_client::structure_blocks::forget_loot_data();
+@@ -365,6 +385,7 @@
+         self.adv.reset_tree();
+         self.native_reload_listeners();
+         self.native_server_data_loaded(true);
++        Ok(())
+     }
+ 
+     pub(super) fn join_world_rest(&mut self) -> Result<()> {
+--- a/crates/horizon-client/src/game/stations.rs
++++ b/crates/horizon-client/src/game/stations.rs
+@@ -2923,6 +2923,28 @@
+     }
+     /// Hovered-slot tooltip on the plain inventory, crafting and container screens.
+     pub(super) fn draw_slot_tooltip(&mut self, batch: &mut HudBatch) {
++        // Action-bar messages normally render beneath an open menu. Keep a quest denial
++        // readable next to the result even if the pointer has moved since the click.
++        if self
++            .slot_at(batch, self.cursor.0, self.cursor.1)
++            .is_some_and(|s| self.locked_craft_icon(s).is_some())
++            && self.titles.overlay_time > 0
++            && let Some(reason) = self.titles.overlay.as_ref()
++            && reason.translation_key() == Some("horizon.quests.craft_locked")
++        {
++            let (ox, oy) = self.inventory_origin(batch);
++            let (sx, sy) = self.slot_position(200);
++            let lines: Vec<_> = self
++                .gui
++                .atlas
++                .font
++                .split(reason, (batch.width as f32 - 18.0).min(180.0))
++                .into_iter()
++                .map(|line| (line, u32::MAX))
++                .collect();
++            self.draw_tooltip_lines(batch, &lines, ox + sx, oy + sy + 29.0);
++            return;
++        }
+         let Some(slot) = self.slot_at(batch, self.cursor.0, self.cursor.1) else {
+             return;
+         };
+--- a/crates/horizon-client/src/game/titles.rs
++++ b/crates/horizon-client/src/game/titles.rs
+@@ -29,6 +29,12 @@
+     /// `Hud.extractOverlayMessage`: the action bar.
+     pub(super) fn draw_overlay_message(&self, batch: &mut HudBatch) {
+         let (w, h) = (batch.width as i32, batch.height as i32);
++        if self.screen == super::Screen::Inventory
++            && self.titles.overlay.as_ref().and_then(Text::translation_key)
++                == Some("horizon.quests.craft_locked")
++        {
++            return;
++        }
+         let partial = self.clock.fraction() as f32;
+         let background = self.settings.text_background(0.0);
+         let font = &self.gui.atlas.font;
+--- a/crates/horizon-client/src/lan/menu.rs
++++ b/crates/horizon-client/src/lan/menu.rs
+@@ -73,6 +73,7 @@
+ /// changed.
+ #[derive(Clone, Debug, Default, PartialEq)]
+ pub struct ModCraft {
++    pub locked: bool,
+     pub grid: Vec<Option<ItemStack>>,
+     pub result: Option<ItemStack>,
+ }
+@@ -98,7 +99,13 @@
+     /// The container slot of a mod menu type's crafting result, and what it shows.
+     fn craft_result(&self) -> Option<(usize, Option<ItemStack>)> {
+         let c = self.mod_type?.crafting?;
+-        Some((c.result, self.craft.as_ref().and_then(|c| c.result.clone())))
++        Some((
++            c.result,
++            self.craft
++                .as_ref()
++                .filter(|c| !c.locked)
++                .and_then(|c| c.result.clone()),
++        ))
+     }
+ }
+ 
+@@ -1426,6 +1433,7 @@
+         assert_eq!(slots.get(&world, &g, 0), None);
+         if let Some(m) = g.menu.as_mut() {
+             m.craft = Some(ModCraft {
++                locked: false,
+                 grid: Vec::new(),
+                 result: planks.clone(),
+             });
+--- a/crates/horizon-client/src/menu.rs
++++ b/crates/horizon-client/src/menu.rs
+@@ -96,6 +96,7 @@
+     pub limited_crafting: bool,
+     /// The recipes the player knows (`ServerPlayer.getRecipeBook().contains(id)`).
+     pub known_recipes: Option<&'a dyn KnownRecipes>,
++    pub actor_rules: crate::advancements::crafting_rules::ActorRules<'a>,
+ }
+ 
+ /// The maps of the level a menu is in.
+@@ -1504,6 +1505,9 @@
+ 
+     fn may_pickup(&self, env: &Env, s: usize) -> bool {
+         match self.slots[s].role {
++            Role::CraftResult => self.slot(s).is_none_or(|stack| {
++                crate::advancements::crafting_rules::missing(env.actor_rules, &stack.item).is_none()
++            }),
+             Role::Inert | Role::Hidden => false,
+             // AnvilMenu.mayPickup: the levels to pay, and a price.
+             Role::CombineResult if self.kind == Kind::Anvil => {
+@@ -1794,7 +1798,7 @@
+     }
+ 
+     /// `CraftingMenu.slotChangedCraftingGrid`.
+-    fn recompute(&mut self, env: &Env) {
++    pub fn recompute(&mut self, env: &Env) {
+         if self.grid_size == 0 {
+             return;
+         }
+@@ -2237,6 +2241,9 @@
+     /// `quickMoveStack` of the menu's kind; the moved stack's original copy
+     /// (None when nothing moved).
+     fn quick_move(&mut self, env: &Env, index: usize) -> Option<ItemStack> {
++        if self.slots[index].role == Role::CraftResult && !self.may_pickup(env, index) {
++            return None;
++        }
+         let mut stack = self.slot(index)?.clone();
+         let mut clicked = stack.clone();
+         let total = self.slots.len();
+@@ -2786,6 +2793,36 @@
+         button: i32,
+         input: Input,
+     ) -> Result<(), &'static str> {
++        self.click_inner(env, slot_index, button, input, true)
++    }
++
++    /// Let the host prepare the next actual result and refresh player progression between crafts.
++    pub fn click_one(
++        &mut self,
++        env: &Env,
++        slot_index: i32,
++        button: i32,
++        input: Input,
++    ) -> Result<(), &'static str> {
++        self.click_inner(env, slot_index, button, input, false)
++    }
++
++    fn click_inner(
++        &mut self,
++        env: &Env,
++        slot_index: i32,
++        button: i32,
++        input: Input,
++        repeat: bool,
++    ) -> Result<(), &'static str> {
++        if let Some(s) = usize::try_from(slot_index)
++            .ok()
++            .filter(|&s| s < self.slots.len())
++            && self.slots[s].role == Role::CraftResult
++            && !self.may_pickup(env, s)
++        {
++            return Ok(());
++        }
+         let size = self.slots.len() as i32;
+         let in_range = |i: i32| (0..size).contains(&i);
+         if input == Input::QuickCraft {
+@@ -2899,7 +2936,10 @@
+                 }
+                 let mut clicked = self.quick_move(env, s);
+                 while let Some(c) = &clicked {
+-                    if !self.slot(s).is_some_and(|now| same_item(now, c)) {
++                    if !repeat
++                        || !self.may_pickup(env, s)
++                        || !self.slot(s).is_some_and(|now| same_item(now, c))
++                    {
+                         break;
+                     }
+                     clicked = self.quick_move(env, s);
+@@ -2949,7 +2989,7 @@
+             if let Some(t) = &taken {
+                 self.drop_stack(t);
+             }
+-            if button == 1 {
++            if repeat && button == 1 {
+                 while let Some(t) = &taken {
+                     if !self.slot(s).is_some_and(|now| same_item(now, t)) {
+                         break;
+@@ -3466,9 +3506,13 @@
+ 
+     /// A menu over the game's data (`.local/horizon-client`); skipped without it.
+     pub(crate) fn with_menu(kind: Kind, test: impl FnOnce(&Env, &mut Menu)) {
+-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+-            .join("../../.local/horizon-client")
+-            .join(horizon_core::VANILLA_VERSION);
++        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
++            .map(std::path::PathBuf::from)
++            .unwrap_or_else(|| {
++                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++                    .join("../../.local/horizon-client")
++                    .join(horizon_core::VANILLA_VERSION)
++            });
+         if !root.join("items.json").exists() {
+             return;
+         }
+@@ -3492,6 +3536,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         let mut menu = Menu::new(kind);
+         menu.creative = true;
+@@ -3536,6 +3581,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         let mut fuel = ItemStack::new("minecraft:stone", 2);
+         fuel.data_mut().set_loot_component(
+@@ -3574,6 +3620,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         for (input, payment) in [
+             (Input::Pickup, 8),
+@@ -3955,6 +4002,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         // Both a pick-up onto the cursor and a shift-click into the inventory.
+         for input in [Input::Pickup, Input::QuickMove] {
+@@ -4034,6 +4082,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         let menu = &mut Menu::new(mod_menu());
+         {
+@@ -4123,6 +4172,75 @@
+             std::mem::take(&mut menu.dropped),
+             std::mem::take(&mut menu.crafted),
+         )
++    }
++
++    #[test]
++    fn quest_crafting_denials_preserve_every_slot_and_side_effect() {
++        use crate::advancements::{Progress, Tree, crafting_rules::CraftingRules};
++        let directory = std::env::temp_dir();
++        let files = vec![
++            ("advancement/test:camp".into(), vec![br#"{"criteria":{"done":{"trigger":"minecraft:impossible"}}}"#.to_vec()]),
++            ("progression_rule/test:cake".into(), vec![br#"{"version":1,"action":"craft","scope":"player","output":"minecraft:cake","requires":{"quest_completed":"test:camp"}}"#.to_vec()]),
++        ];
++        let overlay = PackOverlay { files: &files };
++        let tree = Tree::load_with(&directory, &overlay);
++        for kind in [Kind::Crafting, mod_crafting_table()] {
++            with_menu(kind, |env, menu| {
++                let rules =
++                    CraftingRules::load(&overlay, &tree, |id| env.items.get(id).is_some()).unwrap();
++                let mut progress = Progress::default();
++                for (slot, item) in [
++                    "milk_bucket",
++                    "milk_bucket",
++                    "milk_bucket",
++                    "sugar",
++                    "egg",
++                    "sugar",
++                    "wheat",
++                    "wheat",
++                    "wheat",
++                ]
++                .iter()
++                .enumerate()
++                {
++                    menu.set_player_item(slot, stack(item, 1));
++                }
++                let gated = Env {
++                    actor_rules: Some((&rules, &progress)),
++                    ..*env
++                };
++                menu.place_recipe(&gated, "minecraft:cake", false, false, None);
++                assert_eq!(menu.slot(0), stack("cake", 1).as_ref());
++                let before = seen(menu);
++                for (input, button) in [
++                    (Input::Pickup, 0),
++                    (Input::QuickMove, 0),
++                    (Input::Throw, 1),
++                    (Input::Swap, 0),
++                    (Input::Clone, 0),
++                ] {
++                    menu.click(&gated, 0, button, input).unwrap();
++                    assert_eq!(seen(menu), before);
++                    assert!(menu.item_crafted.is_empty() && menu.crafted_counts.is_empty());
++                }
++                progress.grant("test:camp", "done", "");
++                let allowed = Env {
++                    actor_rules: Some((&rules, &progress)),
++                    ..*env
++                };
++                for slot in 0..36 {
++                    menu.set_player_item(slot, stack("stone", 64));
++                }
++                let full = seen(menu);
++                menu.click(&allowed, 0, 0, Input::QuickMove).unwrap();
++                assert_eq!(seen(menu), full);
++                menu.click(&allowed, 0, 0, Input::Pickup).unwrap();
++                assert_eq!(menu.carried, stack("cake", 1));
++                for slot in 1..4 {
++                    assert_eq!(menu.slot(slot), stack("bucket", 1).as_ref());
++                }
++            });
++        }
+     }
+ 
+     /// A mod menu type's crafting grid crafts as the crafting table does
+@@ -4436,6 +4554,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+ 
+         let mut menu = Menu::new(Kind::Inventory);
+@@ -4486,6 +4605,7 @@
+             maps: None,
+             limited_crafting: true,
+             known_recipes: Some(&known),
++            actor_rules: None,
+         };
+ 
+         let mut menu = Menu::new(Kind::Inventory);
+@@ -4536,6 +4656,7 @@
+             maps: None,
+             limited_crafting: true,
+             known_recipes: Some(&known),
++            actor_rules: None,
+         };
+ 
+         let mut menu = Menu::new(Kind::Inventory);
+@@ -4590,6 +4711,7 @@
+             maps: None,
+             limited_crafting: true,
+             known_recipes: Some(&known),
++            actor_rules: None,
+         };
+ 
+         let mut menu = Menu::new(Kind::Inventory);
+--- a/crates/horizon-client/src/stations.rs
++++ b/crates/horizon-client/src/stations.rs
+@@ -2202,6 +2202,7 @@
+             maps: None,
+             limited_crafting: false,
+             known_recipes: None,
++            actor_rules: None,
+         };
+         let mut menu = menu::Menu::new(menu::Kind::Smithing);
+         menu.set_slot(&env, 1, Some(base));
+--- a/crates/horizon-client/examples/probe/cauldron_fixture.rs
++++ b/crates/horizon-client/examples/probe/cauldron_fixture.rs
+@@ -98,6 +98,7 @@
+         maps: None,
+         limited_crafting: false,
+         known_recipes: None,
++        actor_rules: None,
+     };
+     let mut out = String::new();
+     for line in input.lines() {
+--- a/crates/horizon-client/examples/probe/menu_fixture.rs
++++ b/crates/horizon-client/examples/probe/menu_fixture.rs
+@@ -105,6 +105,7 @@
+         maps: Some(&case_maps),
+         limited_crafting: false,
+         known_recipes: None,
++        actor_rules: None,
+     };
+     // The mob effects' network ids (BeaconMenu.encodeEffect).
+     let builtin = horizon_protocol::registry::Builtin::find(root)
+--- a/crates/horizon-client/examples/probe/place_recipe_fixture.rs
++++ b/crates/horizon-client/examples/probe/place_recipe_fixture.rs
+@@ -54,6 +54,7 @@
+         maps: None,
+         limited_crafting: false,
+         known_recipes: None,
++        actor_rules: None,
+     };
+     let mut out = String::new();
+     for (line, order) in cases.lines().zip(orders.lines()) {
+--- a/crates/horizon-client/examples/probe/trading_fixture.rs
++++ b/crates/horizon-client/examples/probe/trading_fixture.rs
+@@ -389,6 +389,7 @@
+                     maps: None,
+                     limited_crafting: false,
+                     known_recipes: None,
++                    actor_rules: None,
+                 };
+                 trade(&mut out, name, &kv, &mut world, &env, origin)?;
+             }

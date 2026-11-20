@@ -1,0 +1,1 @@
+scoreboard objectives add qj02e0c536089bf2 trigger

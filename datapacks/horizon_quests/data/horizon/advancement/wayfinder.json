@@ -1,0 +1,36 @@
+{
+  "parent": "horizon:supplies",
+  "display": {
+    "icon": {
+      "id": "minecraft:compass"
+    },
+    "title": {
+      "text": "Find Your Bearings"
+    },
+    "description": {
+      "text": "Obtain a compass. Reward: 25 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "compass": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:compass"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "compass"
+    ]
+  ],
+  "rewards": {
+    "experience": 25
+  }
+}

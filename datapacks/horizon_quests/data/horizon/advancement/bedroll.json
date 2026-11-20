@@ -1,0 +1,36 @@
+{
+  "parent": "horizon:workbench",
+  "display": {
+    "icon": {
+      "id": "minecraft:white_bed"
+    },
+    "title": {
+      "text": "A Place to Sleep"
+    },
+    "description": {
+      "text": "Obtain a white bed. Reward: 15 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "white_bed": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:white_bed"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "white_bed"
+    ]
+  ],
+  "rewards": {
+    "experience": 15
+  }
+}

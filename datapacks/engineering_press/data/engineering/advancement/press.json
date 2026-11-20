@@ -1,0 +1,21 @@
+{
+  "display": {
+    "icon": {
+      "id": "minecraft:smithing_table"
+    },
+    "title": {
+      "text": "Field Engineering"
+    },
+    "description": {
+      "text": "Stand on a smithing table and use /trigger eng_press to make 24 rails from six iron ingots and a stick."
+    },
+    "announce_to_chat": false,
+    "show_toast": false,
+    "background": "minecraft:gui/advancements/backgrounds/stone"
+  },
+  "criteria": {
+    "achieved": {
+      "trigger": "minecraft:tick"
+    }
+  }
+}

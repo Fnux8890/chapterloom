@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "action",
+    "scope",
+    "output",
+    "requires"
+  ],
+  "properties": {
+    "version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "action": {
+      "const": "craft"
+    },
+    "scope": {
+      "const": "player"
+    },
+    "output": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-][a-z0-9_.-]*:[a-z0-9_.-]+(?:/[a-z0-9_.-]+)*$"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quest_completed"
+      ],
+      "properties": {
+        "quest_completed": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-][a-z0-9_.-]*:[a-z0-9_.-]+(?:/[a-z0-9_.-]+)*$"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "values": [
+    {
+      "id": "colonies:api/v1/unlock/master_builder",
+      "required": false
+    }
+  ]
+}

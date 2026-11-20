@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Horizon Quest Journal chapter v1",
+  "type": "object",
+  "required": ["version", "root"],
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9_.-]+:[a-z0-9_.-]+(/[a-z0-9_.-]+)*$"},
+    "short": {"type": "integer", "minimum": -32768, "maximum": 32767}
+  },
+  "properties": {
+    "version": {"const": 1},
+    "root": {"$ref": "#/$defs/id"},
+    "order": {"$ref": "#/$defs/short", "default": 0},
+    "positions": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/short"}}
+    }
+  }
+}

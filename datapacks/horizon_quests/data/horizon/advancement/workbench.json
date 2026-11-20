@@ -1,0 +1,42 @@
+{
+  "parent": "horizon:journal",
+  "display": {
+    "icon": {
+      "id": "minecraft:crafting_table"
+    },
+    "title": {
+      "text": "",
+      "extra": [
+        {
+          "text": "Set Up Camp"
+        }
+      ],
+      "horizon:claim_v1": "qj02e0c536089bf2"
+    },
+    "description": {
+      "text": "Obtain a crafting table.\nReward: 10 XP."
+    },
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "crafting_table": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:crafting_table"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "crafting_table"
+    ]
+  ],
+  "rewards": {
+    "function": "horizon:journal_claim/workbench/earn"
+  }
+}

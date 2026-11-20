@@ -1,0 +1,24 @@
+{
+  "display": {
+    "icon": {
+      "id": "minecraft:rail"
+    },
+    "title": {
+      "text": "First Production Run"
+    },
+    "description": {
+      "text": "Produce a batch of rails at the field press. Reward: 10 XP."
+    },
+    "announce_to_chat": false,
+    "show_toast": true
+  },
+  "criteria": {
+    "achieved": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "parent": "engineering:press",
+  "rewards": {
+    "experience": 10
+  }
+}
