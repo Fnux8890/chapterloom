@@ -12,8 +12,34 @@ A quest book for Horizon 26.3. Press **L** to open a chapter, follow its quest m
 
 The release also includes two example world profiles. Beginner allows ordinary blast furnace crafting. Expert unlocks that recipe when the player completes **Set Up Camp**, even if they wait to claim the XP.
 
-## Build on the journal
+## Gate a recipe with a data pack
 
-- **Mod authors** can generate a chapter with the offline Python CLI, connect a gameplay event, and award items such as stone bricks. Start with the [mod author guide](https://github.com/Fnux8890/horizon-quest-journal/blob/v1.1.2-beta.1/tools/quest-journal/README.md).
-- **Modpack authors** can load an override pack last to change a chapter or reward, or add a quest prerequisite to a recipe. See the [crafting rule guide](https://github.com/Fnux8890/horizon-quest-journal/blob/v1.1.2-beta.1/docs/quest-gated-crafting.md) and the [Beginner and Expert examples](https://github.com/Fnux8890/horizon-quest-journal/tree/v1.1.2-beta.1/examples/press-profiles).
-- **Contributors** can browse the [tagged beta source](https://github.com/Fnux8890/horizon-quest-journal/tree/v1.1.2-beta.1) and follow the [contribution instructions](https://github.com/Fnux8890/horizon-quest-journal/tree/v1.1.2-beta.1#contribute).
+In a fresh world with the beta runtime and Founders chapter enabled, create a folder named `camp_rules` inside the world's `datapacks/` folder. Add these two files with a text editor.
+
+**`camp_rules/pack.mcmeta`**
+
+```json
+{"pack":{"description":"Camp crafting rules","min_format":121,"max_format":121}}
+```
+
+**`camp_rules/data/camp/progression_rule/blast_furnace.json`**
+
+```json
+{
+  "version": 1,
+  "action": "craft",
+  "scope": "player",
+  "output": "minecraft:blast_furnace",
+  "requires": {"quest_completed": "horizon:workbench"}
+}
+```
+
+Run `/reload` and check `/datapack list enabled`. If needed, run `/datapack enable "file/camp_rules" last`. To test, use a player who has never obtained a crafting table and open one already placed in the world. Assemble a blast furnace: the result shows a red barrier. Pick up a crafting table to complete **Set Up Camp**, then try the recipe again. You can craft the furnace before claiming the XP.
+
+## Add quests to a mod
+
+Ship a companion data pack with your mod. Put the chapter definition under `data/<namespace>/quest_chapter/` and its quests under `data/<namespace>/advancement/`. Use a built-in advancement trigger for actions such as obtaining an item. For a custom action, have the mod call a namespaced function tag as the credited player after the action succeeds.
+
+The optional Python CLI can scaffold a chapter, check references across packs, and build a ZIP for distribution. The game reads the same JSON files from a folder or a ZIP.
+
+[Mod author guide](https://github.com/Fnux8890/horizon-quest-journal/blob/4532f352209415ce9428c7f717bd9d9c37a6db5d/tools/quest-journal/README.md) · [Modpack guide](https://github.com/Fnux8890/horizon-quest-journal/blob/4532f352209415ce9428c7f717bd9d9c37a6db5d/docs/quest-gated-crafting.md) · [Beta source and contribution instructions](https://github.com/Fnux8890/horizon-quest-journal/tree/v1.1.2-beta.1#contribute)
