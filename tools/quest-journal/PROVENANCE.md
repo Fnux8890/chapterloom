@@ -1,4 +1,4 @@
-# Quest Journal source and assets
+# Chapterloom source and assets
 
 The runtime patch modifies Horizon at revision 7bf49fa2810efa4e293e8867cabe831fea59378d. It contains Horizon source context. The distribution includes the original copyright and MIT permission notice in HORIZON-LICENSE.txt. [Pinned Horizon license](https://github.com/horizon-rust/horizon/blob/7bf49fa2810efa4e293e8867cabe831fea59378d/LICENSE)
 

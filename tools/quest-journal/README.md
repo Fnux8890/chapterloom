@@ -1,4 +1,4 @@
-# Horizon Quest Journal 1.1
+# Chapterloom 1.1
 
 A chapter is a data pack. A new mod can contribute quests, attach children to another mod's chapter, or award a quest after a server action succeeds. Players press **L**, use the arrows around the chapter counter, drag the map, and select an item to read its objective and reward. The Advancements button opens the standard advancement view.
 

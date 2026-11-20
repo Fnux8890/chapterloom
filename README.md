@@ -1,10 +1,10 @@
-# Horizon Quest Journal
+# Chapterloom
 
 **Public beta 1.1.2-beta.1 Â· Horizon 26.3.** Press **L** to open a hardcover journal, follow the branches of a chapter and select a quest to read its objective and rewards. Obtain a crafting table in the Founders chapter to complete **Set Up Camp**, select its gold exclamation mark and choose **Claim reward** for 10 XP.
 
 ![Open quest journal with chapter map and quest details](docs/media/quest-journal/equal-page-spread.png)
 
-[Download the Founders pack and example profiles](https://github.com/Fnux8890/horizon-quest-journal/releases/tag/v1.1.2-beta.1)
+[Download the Founders pack and example profiles](https://github.com/Fnux8890/chapterloom/releases/tag/v1.1.2-beta.1)
 
 ## Build the beta runtime
 

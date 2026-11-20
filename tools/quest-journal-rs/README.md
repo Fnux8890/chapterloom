@@ -1,4 +1,4 @@
-# Quest Journal CLI for Rust developers
+# Chapterloom CLI for Rust developers
 
 Use `quest-journal` to work with Horizon 26.3 journal data packs. Install from a checkout containing this directory, using Cargo:
 

@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about = "Author Horizon Quest Journal data packs")]
+#[command(version, about = "Author Chapterloom data packs")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

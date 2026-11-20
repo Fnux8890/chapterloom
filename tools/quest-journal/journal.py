@@ -1,4 +1,4 @@
-"""Build Horizon quest journal v1 companion packs. Python 3.10+, standard library."""
+"""Build Chapterloom v1 companion packs. Python 3.10+, standard library."""
 import argparse
 import hashlib
 import json
