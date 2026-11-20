@@ -40,6 +40,17 @@ Run `/reload` and check `/datapack list enabled`. If needed, run `/datapack enab
 
 Ship a companion data pack with your mod. Put the chapter definition under `data/<namespace>/quest_chapter/` and its quests under `data/<namespace>/advancement/`. Use a built-in advancement trigger for actions such as obtaining an item. For a custom action, have the mod call a namespaced function tag as the credited player after the action succeeds.
 
-The optional Python CLI can scaffold a chapter, check references across packs, and build a ZIP for distribution. The game reads the same JSON files from a folder or a ZIP.
+## Optional author tools
 
-[Mod author guide](https://github.com/Fnux8890/horizon-quest-journal/blob/4532f352209415ce9428c7f717bd9d9c37a6db5d/tools/quest-journal/README.md) · [Modpack guide](https://github.com/Fnux8890/horizon-quest-journal/blob/4532f352209415ce9428c7f717bd9d9c37a6db5d/docs/quest-gated-crafting.md) · [Beta source and contribution instructions](https://github.com/Fnux8890/horizon-quest-journal/tree/v1.1.2-beta.1#contribute)
+The [Rust CLI](https://github.com/Fnux8890/horizon-quest-journal/tree/4509be508d2a5325782e5f7be0fb525abedc088a/tools/quest-journal-rs) and [Python CLI](https://github.com/Fnux8890/horizon-quest-journal/tree/4509be508d2a5325782e5f7be0fb525abedc088a/tools/quest-journal) both support `init`, `check`, `manual`, and `build`. Choose either for the same data pack. Players only need the pack and the matching journal runtime.
+
+Install the standalone Rust CLI with Cargo:
+
+```sh
+cargo install --locked --git https://github.com/Fnux8890/horizon-quest-journal --rev 4509be508d2a5325782e5f7be0fb525abedc088a quest-journal
+quest-journal check camp_rules --dependency datapacks/horizon_quests
+```
+
+With Python 3.10+, run `python tools/quest-journal/journal.py check camp_rules --dependency datapacks/horizon_quests` from the source checkout. In both examples, point the input and dependency paths at your unpacked packs.
+
+[Mod author guide](https://github.com/Fnux8890/horizon-quest-journal/blob/4509be508d2a5325782e5f7be0fb525abedc088a/tools/quest-journal/README.md) · [Modpack guide](https://github.com/Fnux8890/horizon-quest-journal/blob/4509be508d2a5325782e5f7be0fb525abedc088a/docs/quest-gated-crafting.md) · [Beta source and contribution instructions](https://github.com/Fnux8890/horizon-quest-journal/tree/v1.1.2-beta.1#contribute)
